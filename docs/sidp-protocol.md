@@ -22,11 +22,23 @@ SIDP v1 非目标：
 
 当前只有 Cortex-M4 目标板可用于实机测试，因此M4是首个端到端验证profile。Cortex-M0和M3仍属于v1协议与实现范围，但在获得对应硬件前必须标记为未经实机验证。
 
+### 1.1 主协议与预留定义的关系
+
+`include/sidp_defs.hpp` 是共享的wire declaration头文件。为了提前发现数值冲突，它目前也包含 `sidp-addition-esp32-gdbstub.md` 提议的以下未来扩展定义：
+
+- `ARCH_XTENSA` 和 `PROFILE_XTENSA_ESP32` / `ESP32S2` / `ESP32S3`；
+- `CAP_POST_MORTEM` 和 `CAP_TARGET_GDB_STUB`；
+- `OP_ATTACH_GDB_STUB` 和 `attach_gdb_stub_request_t`。
+
+这些符号出现在头文件中只表示源码级预留，不表示它们属于SIDP v1 wire contract，也不表示Soul Injector或Soul Agent已经实现、协商或接受该扩展。SIDP v1实现必须只接受本文定义的v1操作；收到 `OP_ATTACH_GDB_STUB` 时，未显式实现完整扩展的endpoint必须返回 `STATUS_UNSUPPORTED`。实现不得根据某个枚举符号在编译期可见，就宣称对应capability可用。
+
+上述扩展编号在ESP32 GDB Stub扩展正式纳入主协议前不提供稳定性承诺，可能调整；v1持久化数据、兼容性测试和能力判断不得依赖这些预留值。扩展的完整语义和启用条件以 `sidp-addition-esp32-gdbstub.md` 为准。
+
 ## 2. 传输与字节序
 
 - 传输使用 WebSocket binary message。
 - 一个 WebSocket message 必须包含一个完整 SIDP message。
-- WebSocket 分片由 WebSocket library 重组，SIDP 不感知分片。
+- WebSocket 分片由接收端 transport 负责重组：Soul Injector 侧的 WebSocket transport 已实现协议级 continuation 帧重组（esp_websocket_client 不替应用层重组分片）。Soul Agent 不应主动发送分片帧，但双方都必须容忍接收到分片帧。
 - SIDP v1 只支持 little-endian 主机和目标，不实现大端兼容。
 - 所有多字节整数直接使用 little-endian 本机表示，不做字节序转换。
 - 目标内存数据按地址顺序传输，不做字节交换。

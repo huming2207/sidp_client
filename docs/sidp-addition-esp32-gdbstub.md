@@ -4,6 +4,20 @@
 
 本扩展不属于 SIDP v1。SIDP v1 的验收范围仍为 Cortex-M0、Cortex-M3 和 Cortex-M4。
 
+## 0. 预留定义与实现状态
+
+共享头文件 `include/sidp_defs.hpp` 当前已经包含本扩展提议的架构、profile、capability、opcode和attach request定义。代码中的名称位于 `sidp` namespace，例如 `sidp::ARCH_XTENSA` 和 `sidp::attach_gdb_stub_request_t`；本文代码块保留带 `SIDP_` / `sidp_` 前缀的设计名称，用于强调对应wire概念。
+
+把这些定义放入共享头文件是为了预留和检查wire布局，不代表本扩展已经实现，也不把它们提升为SIDP v1的一部分。必须遵守以下边界：
+
+1. 未实现本扩展的Soul Injector收到 `OP_ATTACH_GDB_STUB` 必须返回 `STATUS_UNSUPPORTED`，不得仅因为能解析request struct就接受请求。
+2. Soul Injector只有在本文件规定的只读post-mortem状态机、目标RSP映射、快照和错误处理全部实现后，才能成功响应该attach操作。
+3. 未完整实现扩展时不得在任何attach response中设置 `CAP_POST_MORTEM` 或 `CAP_TARGET_GDB_STUB`；Soul Agent也不得根据符号在头文件中存在就推断设备支持该能力。
+4. 扩展attach成功时，response必须使用准确的目标architecture/profile，同时至少设置 `CAP_POST_MORTEM | CAP_TARGET_GDB_STUB`。它还必须满足第5、6节的只读能力和零硬件断点/watchpoint约束。
+5. Attach不得隐式复位目标；否则会破坏本扩展要读取的崩溃现场。
+
+这些数值在本扩展正式进入SIDP主协议前仍是预留值，不提供稳定ABI承诺。实现实验版本时必须把Soul Injector、Soul Agent和测试fixture锁定到同一份头文件revision；编号调整时三者一起更新，不能与正式v1兼容性承诺混在一起。
+
 ## 1. 能力边界
 
 ESP-IDF 启用 `CONFIG_ESP_SYSTEM_PANIC_GDBSTUB` 后，目标发生严重错误时不立即复位，而是在 UART 上运行 GDB RSP server。panic 模式主要用于事后检查：可以读取 CPU 寄存器、变量和内存，但不能将其视为完整硬件调试会话。
@@ -72,7 +86,7 @@ SIDP的寄存器值没有固定成Cortex-M结构，因此Xtensa和RISC-V寄存�
 
 ## 4. 架构和profile扩展
 
-原始ESP32和部分ESP32系列使用Xtensa核，不能用现有Arm-M或RISC-V架构标识。建议增加：
+原始ESP32和部分ESP32系列使用Xtensa核，不能用现有Arm-M或RISC-V架构标识。以下建议值已经作为未来扩展预留定义放入共享头文件，但仍受第0节的实现门槛和稳定性限制：
 
 ```c
 enum sidp_architecture_t : uint8_t {
@@ -105,7 +119,7 @@ RISC-V ESP32目标可以继续使用 `SIDP_ARCH_RISCV` 和 `SIDP_PROFILE_RV32`�
 
 ## 5. 新增capability
 
-建议在 `sidp_capability_t` 中预留：
+以下capability bit已经在共享头文件中预留，但只有实现完整扩展会话语义后才能对外设置：
 
 ```c
 enum sidp_capability_t : uint32_t {
@@ -137,7 +151,7 @@ Attach response中的 `hardware_breakpoints` 和 `hardware_watchpoints` 必须�
 
 ## 6. 新的attach操作
 
-现有 `sidp_attach_request_t` 表达connect-under-reset等SWD会话行为，不适合复用为UART GDB Stub配置。SWD/JTAG时钟本来就由Soul Injector本地YAML配置决定，不属于任何SIDP attach request。保持主结构简单，新增独立opcode：
+现有 `sidp_attach_request_t` 表达connect-under-reset等SWD会话行为，不适合复用为UART GDB Stub配置。SWD/JTAG时钟本来就由Soul Injector本地YAML配置决定，不属于任何SIDP attach request。共享头文件当前预留了以下独立opcode和request结构；其存在本身不代表dispatcher已经支持该操作：
 
 ```c
 enum sidp_opcode_t : uint16_t {
