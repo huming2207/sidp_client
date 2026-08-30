@@ -153,7 +153,8 @@ namespace sidp
 
         /**
          * @brief Installs the complete hardware breakpoint set (replacement
-         *        semantics). Fails without partial application.
+         *        semantics). Fails without partial application. Entries are
+         *        assigned to comparator indices in span order.
          */
         [[nodiscard]] virtual esp_err_t apply_breakpoints(std::span<const bp_entry_t> entries) = 0;
 

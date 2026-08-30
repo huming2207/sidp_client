@@ -300,6 +300,7 @@ namespace sidp
         supported_vector_catch = info.supported_vector_catch_mask;
         stop_id = 0;
         clear_debug_state();
+        clear_run_tracking();
         sw_count = 0;
 
         // Copy the full memory map for access validation and stack clipping;
@@ -423,6 +424,7 @@ namespace sidp
         state = TARGET_DETACHED;
         stop_id = 0;
         clear_debug_state();
+        clear_run_tracking();
     }
 
     void sidp_session::op_get_state(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept
@@ -733,17 +735,17 @@ namespace sidp
             return;
         }
 
-        constexpr std::size_t MAX_HW_BP = 16;
         constexpr std::size_t MAX_WP = 16;
-        if (req.breakpoint_count > MAX_HW_BP + MAX_SOFTWARE_BREAKPOINTS || req.watchpoint_count > MAX_WP) {
+        if (req.breakpoint_count > MAX_HARDWARE_BREAKPOINTS + MAX_SOFTWARE_BREAKPOINTS ||
+            req.watchpoint_count > MAX_WP) {
             send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
             return;
         }
 
-        std::array<bp_entry_t, MAX_HW_BP> hw_entries{};
-        std::size_t hw_count = 0;
-        std::array<bp_entry_t, MAX_SOFTWARE_BREAKPOINTS> sw_entries{};
-        std::size_t sw_count = 0;
+        bp_entry_t hw_entries[MAX_HARDWARE_BREAKPOINTS]{};
+        std::size_t requested_hw_count = 0;
+        bp_entry_t sw_entries[MAX_SOFTWARE_BREAKPOINTS]{};
+        std::size_t requested_sw_count = 0;
 
         const auto *bps = reinterpret_cast<const breakpoint_t *>(payload.data() + fixed);
         for (std::size_t index = 0; index < req.breakpoint_count; ++index) {
@@ -760,28 +762,29 @@ namespace sidp
                     send_response(OP_RUN, request_id, STATUS_INVALID_ARGUMENT);
                     return;
                 }
-                if (sw_count == sw_entries.size()) {
+                if (requested_sw_count == MAX_SOFTWARE_BREAKPOINTS) {
                     send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
                     return;
                 }
-                sw_entries[sw_count++] = bp_entry_t{entry.breakpoint_id, entry.address, entry.kind,
-                                                    entry.instruction_size, entry.temporary};
+                sw_entries[requested_sw_count++] = bp_entry_t{entry.breakpoint_id, entry.address, entry.kind,
+                                                              entry.instruction_size, entry.temporary};
             } else {
                 if (entry.instruction_size != 0 || (entry.address & 1u) != 0 ||
                     !is_executable_range(entry.address, 2, false)) {
                     send_response(OP_RUN, request_id, STATUS_INVALID_ARGUMENT);
                     return;
                 }
-                if (hw_count == hw_entries.size()) {
+                if (requested_hw_count == MAX_HARDWARE_BREAKPOINTS) {
                     send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
                     return;
                 }
-                hw_entries[hw_count++] = bp_entry_t{entry.breakpoint_id, entry.address, entry.kind, 0, entry.temporary};
+                hw_entries[requested_hw_count++] = bp_entry_t{entry.breakpoint_id, entry.address, entry.kind,
+                                                              0, entry.temporary};
             }
         }
 
         const auto *wps = reinterpret_cast<const watchpoint_t *>(payload.data() + fixed + bp_bytes);
-        std::array<wp_entry_t, MAX_WP> wp_entries{};
+        wp_entry_t wp_entries[MAX_WP]{};
         for (std::size_t index = 0; index < req.watchpoint_count; ++index) {
             const watchpoint_t &entry = wps[index];
             if (entry.watchpoint_id == 0 || entry.enabled != 1 ||
@@ -800,23 +803,24 @@ namespace sidp
         // All-or-nothing installation: software shadow, hardware, watchpoints,
         // vector catch, then resume. Any failure rolls back to a zero
         // configuration and keeps the target halted.
-        const auto fail_run = [this, request_id](status_t status) {
-            send_response(OP_RUN, request_id, rollback_run_config() ? status : STATUS_SWD_ERROR);
-        };
-        if (!sw_bp_apply({sw_entries.data(), sw_count})) {
-            fail_run(STATUS_INVALID_ARGUMENT);
+        if (!sw_bp_apply({sw_entries, requested_sw_count})) {
+            fail_run(request_id, STATUS_INVALID_ARGUMENT);
             return;
         }
-        if (backend.apply_breakpoints({hw_entries.data(), hw_count}) != ESP_OK) {
-            fail_run(STATUS_NO_BREAKPOINT_SLOT);
+        if (backend.apply_breakpoints({hw_entries, requested_hw_count}) != ESP_OK) {
+            fail_run(request_id, STATUS_NO_BREAKPOINT_SLOT);
             return;
         }
-        if (backend.apply_watchpoints({wp_entries.data(), req.watchpoint_count}) != ESP_OK) {
-            fail_run(STATUS_NO_WATCHPOINT_SLOT);
+        hw_count = requested_hw_count;
+        for (std::size_t index = 0; index < hw_count; ++index) {
+            hw_breakpoint_ids[index] = hw_entries[index].breakpoint_id;
+        }
+        if (backend.apply_watchpoints({wp_entries, req.watchpoint_count}) != ESP_OK) {
+            fail_run(request_id, STATUS_NO_WATCHPOINT_SLOT);
             return;
         }
         if (backend.set_vector_catch(req.vector_catch_mask) != ESP_OK) {
-            fail_run(STATUS_UNSUPPORTED);
+            fail_run(request_id, STATUS_UNSUPPORTED);
             return;
         }
 
@@ -861,6 +865,8 @@ namespace sidp
         }
 
         running_action = req.action;
+        run_to_active = req.action == RUN_TO_ADDRESS;
+        active_run_to_address = run_to_active ? req.run_to_address : 0;
         state = TARGET_RUNNING;
         send_response(OP_RUN, request_id, STATUS_OK);
 
@@ -944,6 +950,7 @@ namespace sidp
         // Reset invalidates the old stop cache, but the stop generation stays
         // monotonic for the lifetime of this connection (§7).
         clear_debug_state();
+        clear_run_tracking();
         enter_halted(stop);
         send_response(OP_RESET_HALT, request_id, STATUS_OK);
         emit_pending_stopped();
@@ -980,6 +987,7 @@ namespace sidp
         }
 
         clear_debug_state();
+        clear_run_tracking();
         state = TARGET_RUNNING;
         send_response(OP_RESET_RUN, request_id, STATUS_OK);
     }
@@ -1012,6 +1020,7 @@ namespace sidp
         state = TARGET_DETACHED;
         stop_id = 0;
         clear_debug_state();
+        clear_run_tracking();
     }
 
     // ---- Stop pipeline --------------------------------------------------------------------
@@ -1036,6 +1045,8 @@ namespace sidp
         } else if (stop.watchpoint_match || (stop.dfsr & DFSR_DWTTRAP) != 0) {
             reason = STOP_WATCHPOINT;
             watchpoint_address = stop.watchpoint_address;
+        } else if (run_to_active && stop.comparator_match && stop.pc == active_run_to_address) {
+            reason = STOP_RUN_TO_ADDRESS;
         } else if (stop.comparator_match || (stop.dfsr & DFSR_BKPT) != 0) {
             const sw_bp_t *sw = sw_bp_find_by_address(stop.pc);
             if (sw != nullptr) {
@@ -1043,7 +1054,10 @@ namespace sidp
                 reason = STOP_BREAKPOINT;
                 breakpoint_id = sw->id;
             } else {
-                reason = STOP_BREAKPOINT; // hardware comparator; ID mapping deferred
+                reason = STOP_BREAKPOINT;
+                if (stop.comparator_match && stop.comparator_index < hw_count) {
+                    breakpoint_id = hw_breakpoint_ids[stop.comparator_index];
+                }
             }
         } else if (stop.fault) {
             reason = STOP_FAULT;
@@ -1074,6 +1088,8 @@ namespace sidp
         pending_stack_size = 0;
         pending_stack_address = 0;
         running_action = RUN_CONTINUE;
+        run_to_active = false;
+        active_run_to_address = 0;
 
         // Full snapshot only when the capability is advertised (section 11);
         // otherwise STOPPED degrades to reason + stop_id + hit info only.
@@ -1418,7 +1434,13 @@ namespace sidp
         ok = backend.apply_breakpoints({}) == ESP_OK && ok;
         ok = backend.apply_watchpoints({}) == ESP_OK && ok;
         ok = backend.set_vector_catch(VECTOR_CATCH_NONE) == ESP_OK && ok;
+        clear_run_tracking();
         return ok;
+    }
+
+    void sidp_session::fail_run(std::uint32_t request_id, status_t status) noexcept
+    {
+        send_response(OP_RUN, request_id, rollback_run_config() ? status : STATUS_SWD_ERROR);
     }
 
     // ---- Memory access validation (protocol section 9) -----------------------------------------
@@ -1526,6 +1548,14 @@ namespace sidp
         pending_registers_size = 0;
         pending_stack_size = 0;
         pending_stack_address = 0;
+    }
+
+    void sidp_session::clear_run_tracking() noexcept
+    {
+        running_action = RUN_CONTINUE;
+        run_to_active = false;
+        active_run_to_address = 0;
+        hw_count = 0;
     }
 
 }

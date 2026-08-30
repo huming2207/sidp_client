@@ -123,6 +123,7 @@ public:
             stop.halted = true;
             stop.pc = last_pc;
             stop.comparator_match = last_comparator_match;
+            stop.comparator_index = last_comparator_index;
             stop.dfsr = last_dfsr;
             return true;
         }
@@ -144,6 +145,7 @@ public:
         stop.halted = true;
         stop.pc = last_pc;
         stop.comparator_match = last_comparator_match;
+        stop.comparator_index = last_comparator_index;
         stop.dfsr = last_dfsr;
         return ESP_OK;
     }
@@ -292,6 +294,7 @@ public:
     // Script hooks: what the next observed stop looks like.
     std::uint32_t last_pc = 0x1000;
     bool last_comparator_match = false;
+    std::uint8_t last_comparator_index = 0;
     std::uint32_t last_dfsr = 0;
 
 private:
@@ -1482,6 +1485,76 @@ int main()
         session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
         CHECK(response_status(tx_frames.size() - 1) == STATUS_INVALID_ARGUMENT);
         CHECK(target.resume_calls == 0);
+    }
+
+    // ---- Test 34: hardware comparator maps back to the SIDP breakpoint ID ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        (void)session.init();
+
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        const std::uint64_t bp_address = mock_target_t::RAM_BASE + 0x900;
+        std::array<std::uint8_t, sizeof(run_request_t) + sizeof(breakpoint_t)> run_payload{};
+        auto *run = reinterpret_cast<run_request_t *>(run_payload.data());
+        run->stop_id = session.get_stop_id();
+        run->action = RUN_CONTINUE;
+        run->breakpoint_count = 1;
+        auto *bp = reinterpret_cast<breakpoint_t *>(run_payload.data() + sizeof(run_request_t));
+        *bp = breakpoint_t{42, bp_address, BREAKPOINT_HARDWARE, 0, 1, 0};
+        session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
+
+        tx_frames.clear();
+        target.halted = true;
+        target.running = false;
+        backend.last_pc = static_cast<std::uint32_t>(bp_address);
+        backend.last_comparator_match = true;
+        backend.last_comparator_index = 0;
+        session.handle_poll();
+
+        CHECK(tx_frames.size() == 1);
+        const auto view = parse_frame(0);
+        const auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
+        CHECK(stopped->reason == STOP_BREAKPOINT);
+        CHECK(stopped->breakpoint_id == 42);
+    }
+
+    // ---- Test 35: run-to comparator has its distinct stop reason ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        (void)session.init();
+
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        const std::uint64_t run_to_address = mock_target_t::RAM_BASE + 0xA00;
+        run_request_t run{};
+        run.stop_id = session.get_stop_id();
+        run.action = RUN_TO_ADDRESS;
+        run.run_to_address = run_to_address;
+        session.handle_request(make_request(OP_RUN, 2, &run, sizeof(run)));
+
+        tx_frames.clear();
+        target.halted = true;
+        target.running = false;
+        backend.last_pc = static_cast<std::uint32_t>(run_to_address);
+        backend.last_comparator_match = true;
+        session.handle_poll();
+
+        CHECK(tx_frames.size() == 1);
+        const auto view = parse_frame(0);
+        const auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
+        CHECK(stopped->reason == STOP_RUN_TO_ADDRESS);
+        CHECK(stopped->breakpoint_id == 0);
     }
 
     printf(failures == 0 ? "ALL TESTS PASSED\n" : "%d FAILURES\n", failures);

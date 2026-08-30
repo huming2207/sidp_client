@@ -15,6 +15,9 @@ namespace sidp
     /** @brief Maximum concurrent software breakpoints tracked by the shadow table. */
     inline constexpr std::size_t MAX_SOFTWARE_BREAKPOINTS = 32;
 
+    /** @brief Maximum hardware breakpoint comparators tracked by the session. */
+    inline constexpr std::size_t MAX_HARDWARE_BREAKPOINTS = 16;
+
     /** @brief Maximum memory regions copied from the attach response. */
     inline constexpr std::size_t MAX_MEMORY_REGIONS = 64;
 
@@ -186,6 +189,7 @@ namespace sidp
         // ---- Run-configuration rollback ----------------------------------------
         /** @brief Clears every debug resource installed for a RUN attempt. */
         [[nodiscard]] bool rollback_run_config() noexcept;
+        void fail_run(std::uint32_t request_id, status_t status) noexcept;
 
         // ---- Software breakpoint step-over -------------------------------------
         /** @brief Outcome of the internal step-over sequence. */
@@ -224,6 +228,7 @@ namespace sidp
         [[nodiscard]] bool is_executable_range(std::uint64_t address, std::size_t size,
                                                bool require_writable) const noexcept;
         void clear_debug_state() noexcept;
+        void clear_run_tracking() noexcept;
 
         target_backend_t &backend;
         tx_sink_t tx_sink;
@@ -235,6 +240,10 @@ namespace sidp
         capability_t capabilities = static_cast<capability_t>(0);
         vector_catch_t supported_vector_catch = VECTOR_CATCH_NONE;
         run_action_t running_action = RUN_CONTINUE;
+        bool run_to_active = false;
+        std::uint64_t active_run_to_address = 0;
+        std::uint32_t hw_breakpoint_ids[MAX_HARDWARE_BREAKPOINTS]{};
+        std::size_t hw_count = 0;
 
         // Frame assembly scratch: the session is driven by one task, so a single
         // reusable frame buffer and data scratch replace 8 KiB stack arrays.
