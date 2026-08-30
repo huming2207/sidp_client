@@ -499,7 +499,7 @@ namespace sidp
             return;
         }
         std::uint8_t *data = reinterpret_cast<std::uint8_t *>(resp) + sizeof(read_memory_response_t);
-        const esp_err_t result = backend.read_mem(req.address, data, req.length);
+        const esp_err_t result = backend.read_mem(req.address, data, req.length, req.access_width);
         if (result != ESP_OK) {
             // The staged frame is discarded; the failure path rebuilds it.
             send_backend_failure(OP_READ_MEMORY, request_id, result, STATUS_ADDRESS_ERROR);
@@ -580,7 +580,7 @@ namespace sidp
             }
         }
 
-        const esp_err_t result = backend.write_mem(req.address, write_image, req.length);
+        const esp_err_t result = backend.write_mem(req.address, write_image, req.length, req.access_width);
         if (result != ESP_OK) {
             send_backend_failure(OP_WRITE_MEMORY, request_id, result, STATUS_ADDRESS_ERROR);
             return;
@@ -1173,7 +1173,7 @@ namespace sidp
         if (size > capacity) {
             size = capacity;
         }
-        if (backend.read_mem(start, pending_registers + pending_registers_size, size) != ESP_OK) {
+        if (backend.read_mem(start, pending_registers + pending_registers_size, size, MEM_WIDTH_DEFAULT) != ESP_OK) {
             return;
         }
         pending_stack_address = start;
@@ -1212,11 +1212,11 @@ namespace sidp
 
         constexpr std::uint8_t BKPT_PATCH[2] = {0x00, 0xBE};
         const auto repatch = [&]() {
-            return backend.write_mem(bp->address, BKPT_PATCH, sizeof(BKPT_PATCH)) == ESP_OK;
+            return backend.write_mem(bp->address, BKPT_PATCH, sizeof(BKPT_PATCH), MEM_WIDTH_DEFAULT) == ESP_OK;
         };
 
         // Restore the complete original instruction, step it, then re-patch.
-        if (backend.write_mem(bp->address, bp->original, bp->instruction_size) != ESP_OK) {
+        if (backend.write_mem(bp->address, bp->original, bp->instruction_size, MEM_WIDTH_DEFAULT) != ESP_OK) {
             return step_over_t::FAILED;
         }
         if (backend.resume(RUN_SINGLE_STEP, 0) != ESP_OK) {
@@ -1293,7 +1293,7 @@ namespace sidp
             slot.installed = false;
 
             std::uint8_t original[4]{};
-            if (backend.read_mem(entry.address, original, entry.instruction_size) != ESP_OK) {
+            if (backend.read_mem(entry.address, original, entry.instruction_size, MEM_WIDTH_DEFAULT) != ESP_OK) {
                 ESP_LOGE(TAG, "sw_bp_apply: sw bp original read failed @0x%llx",
                          static_cast<unsigned long long>(entry.address));
                 (void)sw_bp_restore_all();
@@ -1314,7 +1314,7 @@ namespace sidp
         constexpr std::uint8_t BKPT_PATCH[2] = {0x00, 0xBE}; // little-endian 0xBE00
         for (std::size_t index = 0; index < sw_count; ++index) {
             sw_bp_t &slot = sw_table[index];
-            if (backend.write_mem(slot.address, BKPT_PATCH, sizeof(BKPT_PATCH)) != ESP_OK) {
+            if (backend.write_mem(slot.address, BKPT_PATCH, sizeof(BKPT_PATCH), MEM_WIDTH_DEFAULT) != ESP_OK) {
                 ESP_LOGE(TAG, "sw_bp_apply: sw bp patch write failed @0x%llx",
                          static_cast<unsigned long long>(slot.address));
                 (void)sw_bp_restore_all();
@@ -1348,7 +1348,8 @@ namespace sidp
         if (!entry.installed) {
             return true;
         }
-        const bool ok = backend.write_mem(entry.address, entry.original, entry.instruction_size) == ESP_OK;
+        const bool ok = backend.write_mem(entry.address, entry.original, entry.instruction_size,
+                                          MEM_WIDTH_DEFAULT) == ESP_OK;
         if (ok) {
             entry.installed = false;
         } else {

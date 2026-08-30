@@ -137,11 +137,19 @@ namespace sidp
         /** @brief Writes registers from little-endian byte values. */
         [[nodiscard]] virtual esp_err_t write_regs(const std::uint8_t *data, std::size_t size) = 0;
 
-        /** @brief Reads target memory into out; the session validates ranges. */
-        [[nodiscard]] virtual esp_err_t read_mem(std::uint64_t address, std::uint8_t *out, std::size_t size) = 0;
+        /**
+         * @brief Reads target memory into out; the session validates ranges.
+         *
+         * MEM_WIDTH_DEFAULT is a byte-stream RAM/Flash transfer which may be
+         * implemented using safe aligned chunks. An explicit width requires
+         * accesses of exactly that width; MMIO requests contain exactly one.
+         */
+        [[nodiscard]] virtual esp_err_t read_mem(std::uint64_t address, std::uint8_t *out, std::size_t size,
+                                                 memory_access_width_t width) = 0;
 
-        /** @brief Writes target memory from data; the session validates ranges. */
-        [[nodiscard]] virtual esp_err_t write_mem(std::uint64_t address, const std::uint8_t *data, std::size_t size) = 0;
+        /** @copydoc read_mem */
+        [[nodiscard]] virtual esp_err_t write_mem(std::uint64_t address, const std::uint8_t *data, std::size_t size,
+                                                  memory_access_width_t width) = 0;
 
         /**
          * @brief Installs the complete hardware breakpoint set (replacement

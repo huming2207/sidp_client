@@ -39,6 +39,8 @@ struct mock_target_t {
     std::vector<std::uint32_t> applied_hw_bp_addresses;
     std::vector<std::uint64_t> applied_wp_addresses;
     std::uint32_t last_vector_catch = 0;
+    memory_access_width_t last_read_width = MEM_WIDTH_DEFAULT;
+    memory_access_width_t last_write_width = MEM_WIDTH_DEFAULT;
     detach_action_t last_detach_action = DETACH_RESUME;
     reset_kind_t last_reset_kind = RESET_SYSTEM;
 
@@ -224,8 +226,10 @@ public:
         return fault_next() ? ESP_FAIL : ESP_OK;
     }
 
-    esp_err_t read_mem(std::uint64_t address, std::uint8_t *out, std::size_t size) override
+    esp_err_t read_mem(std::uint64_t address, std::uint8_t *out, std::size_t size,
+                       memory_access_width_t width) override
     {
+        target_.last_read_width = width;
         if (fault_next()) {
             return ESP_FAIL;
         }
@@ -237,8 +241,10 @@ public:
         return ESP_OK;
     }
 
-    esp_err_t write_mem(std::uint64_t address, const std::uint8_t *data, std::size_t size) override
+    esp_err_t write_mem(std::uint64_t address, const std::uint8_t *data, std::size_t size,
+                        memory_access_width_t width) override
     {
+        target_.last_write_width = width;
         if (fault_next()) {
             return ESP_FAIL;
         }
@@ -794,11 +800,12 @@ int main()
         write_req->address = mock_target_t::RAM_BASE + 0x300;
         write_req->length = 4;
         write_req->flags = MEM_ACCESS_ALLOW_RUNNING;
-        write_req->access_width = MEM_WIDTH_DEFAULT;
+        write_req->access_width = MEM_WIDTH_32;
         const std::uint8_t new_bytes[4] = {0xAA, 0xBB, 0xCC, 0xDD};
         std::memcpy(write_payload.data() + sizeof(write_memory_request_t), new_bytes, 4);
         session.handle_request(make_request(OP_WRITE_MEMORY, 3, write_payload.data(), write_payload.size()));
         CHECK(response_status(tx_frames.size() - 1) == STATUS_OK);
+        CHECK(target.last_write_width == MEM_WIDTH_32);
 
         // Target memory: patch first halfword preserved, new bytes elsewhere.
         // (v1 semantics: patch stays, shadow remembers the new instruction.)
@@ -1434,6 +1441,7 @@ int main()
         auto *resp = reinterpret_cast<const read_memory_response_t *>(view.payload);
         CHECK(resp->status == STATUS_OK);
         CHECK(resp->completed_length == 4096);
+        CHECK(target.last_read_width == MEM_WIDTH_8);
         const std::uint8_t *blob = view.payload + sizeof(read_memory_response_t);
         CHECK(blob[0] == 0xA5 && blob[2047] == 0xA5 && blob[4095] == 0xA5);
     }
