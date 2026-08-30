@@ -362,7 +362,12 @@ namespace sidp
         // Post-attach halt snapshot (§7.1 ATTACH from DETACHED executes attach).
         if (params.halt_after_attach) {
             stop_detect_t stop{};
-            if (backend.poll_halted(stop)) {
+            const esp_err_t poll_result = backend.poll_halted(stop);
+            if (poll_result != ESP_OK) {
+                enter_lost(poll_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT);
+                return;
+            }
+            if (stop.halted) {
                 enter_halted(stop);
             } else {
                 const esp_err_t halt_result = backend.halt(HALT_TIMEOUT_MS, stop);
@@ -831,7 +836,8 @@ namespace sidp
         // §10.4: when halted on a software breakpoint, run the internal
         // step-over sequence before the real resume.
         stop_detect_t step_stop{};
-        const step_over_t step = execute_step_over(req.action, step_stop);
+        target_lost_reason_t step_lost_reason = TARGET_LOST_SWD_FAULT;
+        const step_over_t step = execute_step_over(req.action, step_stop, step_lost_reason);
         if (step == step_over_t::FAILED || step == step_over_t::FAILED_LOST) {
             const bool rolled_back = rollback_run_config();
             if (!rolled_back && step == step_over_t::FAILED) {
@@ -841,7 +847,7 @@ namespace sidp
             send_response(OP_RUN, request_id,
                           step == step_over_t::FAILED_LOST ? STATUS_TARGET_LOST : STATUS_SWD_ERROR);
             if (step == step_over_t::FAILED_LOST) {
-                enter_lost(TARGET_LOST_SWD_FAULT); // response first, event follows (§3)
+                enter_lost(step_lost_reason); // response first, event follows (§3)
             }
             return;
         }
@@ -877,7 +883,10 @@ namespace sidp
         // The target may halt immediately; check once so STOPPED always
         // follows the RUN response (§10.1).
         stop_detect_t stop{};
-        if (backend.poll_halted(stop)) {
+        const esp_err_t poll_result = backend.poll_halted(stop);
+        if (poll_result != ESP_OK) {
+            enter_lost(poll_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT);
+        } else if (stop.halted) {
             enter_halted(stop);
             if (req.action == RUN_SINGLE_STEP) {
                 pending_reason = STOP_SINGLE_STEP;
@@ -1003,7 +1012,10 @@ namespace sidp
         }
 
         stop_detect_t stop{};
-        if (backend.poll_halted(stop)) {
+        const esp_err_t poll_result = backend.poll_halted(stop);
+        if (poll_result != ESP_OK) {
+            enter_lost(poll_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT);
+        } else if (stop.halted) {
             enter_halted(stop);
             emit_pending_stopped();
         }
@@ -1265,7 +1277,8 @@ namespace sidp
         }
     }
 
-    sidp_session::step_over_t sidp_session::execute_step_over(run_action_t action, stop_detect_t &step_stop) noexcept
+    sidp_session::step_over_t sidp_session::execute_step_over(run_action_t action, stop_detect_t &step_stop,
+                                                               target_lost_reason_t &lost_reason) noexcept
     {
         step_stop = stop_detect_t{};
 
@@ -1295,7 +1308,15 @@ namespace sidp
         stop_detect_t stop{};
         bool halted = false;
         for (int attempt = 0; attempt < 100; ++attempt) {
-            if (backend.poll_halted(stop)) {
+            const esp_err_t poll_result = backend.poll_halted(stop);
+            if (poll_result != ESP_OK) {
+                if (bp != nullptr) {
+                    (void)sw_bp_install_one(*bp);
+                }
+                lost_reason = poll_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT;
+                return step_over_t::FAILED_LOST;
+            }
+            if (stop.halted) {
                 halted = true;
                 break;
             }
@@ -1305,6 +1326,7 @@ namespace sidp
             if (bp != nullptr) {
                 (void)sw_bp_install_one(*bp);
             }
+            lost_reason = TARGET_LOST_TIMEOUT;
             return step_over_t::FAILED_LOST;
         }
 

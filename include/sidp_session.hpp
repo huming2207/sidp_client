@@ -201,7 +201,8 @@ namespace sidp
             FAILED_LOST,  ///< Target state unknown after an unconsummated step.
         };
         /** @brief Executes the step-over sequence when halted on a sw breakpoint. */
-        [[nodiscard]] step_over_t execute_step_over(run_action_t action, stop_detect_t &step_stop) noexcept;
+        [[nodiscard]] step_over_t execute_step_over(run_action_t action, stop_detect_t &step_stop,
+                                                    target_lost_reason_t &lost_reason) noexcept;
         [[nodiscard]] bool write_current_pc(std::uint32_t pc) noexcept;
         void normalize_pc_in_register_blob(std::uint8_t *data, std::size_t size) const noexcept;
         void update_step_over_after_register_write(const std::uint8_t *data, std::size_t size,

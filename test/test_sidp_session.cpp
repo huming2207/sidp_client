@@ -111,23 +111,20 @@ public:
         return ESP_OK;
     }
 
-    bool poll_halted(stop_detect_t &stop) override
+    esp_err_t poll_halted(stop_detect_t &stop) override
     {
+        stop = stop_detect_t{};
         if (fault_next()) {
-            stop = stop_detect_t{};
-            stop.halted = true; // not used; FAULT path goes through halt()
-            return false;
+            return ESP_FAIL;
         }
+        stop.halted = target_.halted;
         if (target_.halted) {
-            stop = stop_detect_t{};
-            stop.halted = true;
             stop.pc = last_pc;
             stop.comparator_match = last_comparator_match;
             stop.comparator_index = last_comparator_index;
             stop.dfsr = last_dfsr;
-            return true;
         }
-        return false;
+        return ESP_OK;
     }
 
     esp_err_t halt(std::uint32_t, stop_detect_t &stop) override
@@ -538,8 +535,8 @@ int main()
         run_req.action = RUN_CONTINUE;
         session.handle_request(make_request(OP_RUN, 2, &run_req, sizeof(run_request_t)));
 
-        // resume() cleared halted; poll_halted() returns false because the
-        // mock stays running. Force the stop through handle_poll().
+        // resume() cleared halted; polling reports a valid running state.
+        // Force the stop through handle_poll().
         target.halted = true;
         backend.last_pc = 0x08000123;
         backend.last_dfsr = 0; // plain halt request
@@ -553,6 +550,39 @@ int main()
         const auto view = parse_frame(1);
         auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
         CHECK(stopped->stop_id == 2);
+    }
+
+    // ---- Test 4b: polling failure is TARGET_LOST, not "still running" ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        if (session.init() != ESP_OK) {
+            printf("FAIL: session init\n");
+            failures++;
+        }
+
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+        tx_frames.clear();
+
+        run_request_t run_req{};
+        run_req.stop_id = 1;
+        run_req.action = RUN_CONTINUE;
+        session.handle_request(make_request(OP_RUN, 2, &run_req, sizeof(run_req)));
+        tx_frames.clear();
+
+        target.fault_on_next = true;
+        session.handle_poll();
+
+        CHECK(tx_frames.size() == 1);
+        CHECK(frame_header(0)->opcode == EVT_TARGET_LOST);
+        const auto view = parse_frame(0);
+        const auto *lost = reinterpret_cast<const target_lost_event_t *>(view.payload);
+        CHECK(lost->reason == TARGET_LOST_SWD_FAULT);
+        CHECK(session.get_state() == TARGET_LOST);
     }
 
     // ---- Test 5: HALT idempotency: second HALT reports TARGET_HALTED, no extra STOPPED ----

@@ -110,8 +110,11 @@ namespace sidp
          */
         [[nodiscard]] virtual esp_err_t reset(reset_kind_t kind, bool halt_after, stop_detect_t &stop) = 0;
 
-        /** @brief Reads the debug state once; true when the target halted. */
-        [[nodiscard]] virtual bool poll_halted(stop_detect_t &stop) = 0;
+        /**
+         * @brief Reads the debug state once.
+         * @param stop Receives the current halt state when ESP_OK is returned.
+         */
+        [[nodiscard]] virtual esp_err_t poll_halted(stop_detect_t &stop) = 0;
 
         /**
          * @brief Requests a halt and waits locally until the target confirms.
