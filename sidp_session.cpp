@@ -941,8 +941,8 @@ namespace sidp
             return;
         }
 
-        // New session generation after reset (§7 stop_id semantics).
-        stop_id = 0;
+        // Reset invalidates the old stop cache, but the stop generation stays
+        // monotonic for the lifetime of this connection (§7).
         clear_debug_state();
         enter_halted(stop);
         send_response(OP_RESET_HALT, request_id, STATUS_OK);
@@ -979,7 +979,6 @@ namespace sidp
             return;
         }
 
-        stop_id = 0;
         clear_debug_state();
         state = TARGET_RUNNING;
         send_response(OP_RESET_RUN, request_id, STATUS_OK);

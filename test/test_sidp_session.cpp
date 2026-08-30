@@ -689,7 +689,8 @@ int main()
         CHECK(frame_header(1)->opcode == EVT_STOPPED);
         const auto view = parse_frame(1);
         auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
-        CHECK(stopped->stop_id == 1); // reset zeroed the generation, this is stop #1
+        CHECK(stopped->stop_id == 2); // reset is a new stop generation in the same session
+        CHECK(session.get_stop_id() == 2);
         CHECK(target.reset_calls == 1);
         CHECK(target.last_reset_kind == RESET_SYSTEM);
     }
