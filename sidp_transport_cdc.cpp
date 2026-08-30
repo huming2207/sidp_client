@@ -27,9 +27,9 @@ namespace sidp
             return ESP_ERR_NO_MEM;
         }
 
-        const int queue_result = create_packet_queue();
+        const esp_err_t queue_result = create_queues();
         if (queue_result != ESP_OK) {
-            ESP_LOGE(TAG, "init: rx queue creation failed");
+            ESP_LOGE(TAG, "init: queue creation failed");
             heap_caps_free(buffers);
             return queue_result;
         }
@@ -53,50 +53,42 @@ namespace sidp
             cdc_port = TINYUSB_CDC_ACM_0;
             frame_buffer = nullptr;
             tx_buffer = nullptr;
-            destroy_packet_queue();
+            destroy_queues();
             heap_caps_free(buffers);
             return map_esp_error(result);
+        }
+
+        const esp_err_t task_result = spawn_tx_task("sidp_tx_cdc");
+        if (task_result != ESP_OK) {
+            ESP_LOGE(TAG, "init: tx task spawn failed");
+            initialized = false;
+            cdc_port = TINYUSB_CDC_ACM_0;
+            frame_buffer = nullptr;
+            tx_buffer = nullptr;
+            destroy_queues();
+            heap_caps_free(buffers);
+            return task_result;
         }
 
         ESP_LOGI(TAG, "init: cdc transport ready (itf=%d)", port_index);
         return ESP_OK;
     }
 
-    esp_err_t cdc_slip_transport::write_message(std::span<const std::uint8_t> message) noexcept
+    bool cdc_slip_transport::deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept
     {
         if (!is_open()) {
-            discard_pending_tx();
-            return ESP_ERR_INVALID_STATE;
-        }
-        if (message.size() < sizeof(msg_header_t)) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        if (message.size() > MAX_FRAME_SIZE) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        if (tx_size != 0) {
-            return ESP_ERR_INVALID_STATE;
+            return false;
         }
 
-        encode_message(message);
-        return 0;
-    }
-
-    esp_err_t cdc_slip_transport::flush_write(std::uint32_t timeout_ms) noexcept
-    {
-        if (tx_size == 0) {
-            return 0;
-        }
-        if (!is_open()) {
-            discard_pending_tx();
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        const deadline_t deadline{now_ms(), timeout_ms};
+        // SLIP-encode into the preallocated staging buffer; the TX task is
+        // the single consumer, so the staging buffer needs no locking.
+        encode_message(frame);
+        const deadline_t deadline{now_ms(), TX_SEND_TIMEOUT_MS};
         while (tx_offset < tx_size) {
             if (!is_open()) {
-                discard_pending_tx();
-                return ESP_ERR_INVALID_STATE;
+                tx_size = 0;
+                tx_offset = 0;
+                return false;
             }
 
             const std::size_t queued = tinyusb_cdcacm_write_queue(cdc_port, tx_buffer + tx_offset, tx_size - tx_offset);
@@ -107,40 +99,27 @@ namespace sidp
 
             const esp_err_t flush_result = flush_cdc_once(deadline);
             if (flush_result == ESP_ERR_INVALID_STATE) {
-                discard_pending_tx();
-                return flush_result;
+                tx_size = 0;
+                tx_offset = 0;
+                return false;
             }
             if (flush_result != ESP_OK && flush_result != ESP_ERR_NOT_FINISHED) {
-                return flush_result;
+                tx_size = 0;
+                tx_offset = 0;
+                return false;
             }
         }
 
+        // Drain the last bytes from the TinyUSB buffer onto the wire.
         while (true) {
             const esp_err_t flush_result = flush_cdc_once(deadline);
             if (flush_result == ESP_ERR_NOT_FINISHED) {
                 continue;
             }
-            if (flush_result == ESP_ERR_INVALID_STATE) {
-                discard_pending_tx();
-            }
-            if (flush_result != ESP_OK) {
-                return flush_result;
-            }
-            break;
+            tx_size = 0;
+            tx_offset = 0;
+            return flush_result == ESP_OK;
         }
-
-        tx_size = 0;
-        tx_offset = 0;
-        return ESP_OK;
-    }
-
-    void cdc_slip_transport::discard_pending_tx() noexcept
-    {
-        if (tx_size != 0) {
-            ESP_LOGE(TAG, "discard_pending_tx: discarding %u pending tx bytes", static_cast<unsigned>(tx_size));
-        }
-        tx_size = 0;
-        tx_offset = 0;
     }
 
     bool cdc_slip_transport::is_open() const noexcept
@@ -196,9 +175,9 @@ namespace sidp
             return;
         }
 
-        std::uint8_t chunk[RX_READ_CHUNK_SIZE];
         while (true) {
             std::size_t bytes_read = 0;
+            std::uint8_t chunk[RX_READ_CHUNK_SIZE] = {};
             const esp_err_t result = tinyusb_cdcacm_read(cdc_port, chunk, sizeof(chunk), &bytes_read);
             if (result != ESP_OK || bytes_read == 0) {
                 return;

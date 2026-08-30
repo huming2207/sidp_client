@@ -17,14 +17,24 @@ namespace sidp
     inline constexpr std::uint32_t WAIT_FOREVER = std::numeric_limits<std::uint32_t>::max();
 
     /**
+     * @brief How long write_message() waits for TX queue space before it
+     *        gives up and loses the frame. Session responses must not be
+     *        dropped, but a stuck TX task must not wedge the debug task.
+     */
+    inline constexpr std::uint32_t TX_ENQUEUE_TIMEOUT_MS = 10000;
+
+    /**
      * @brief Interface for transporting complete SIDP messages.
      *
      * WebSocket implementations map one SIDP message to one binary WebSocket
      * message. Stream implementations, such as USB CDC-ACM, own their framing
      * and return only the decoded SIDP message.
      *
-     * One reader and one writer may operate concurrently. Multiple writers
-     * must be serialized by the caller so Response/Event ordering is retained.
+     * Each direction owns one queue: decoded inbound frames are received
+     * through start_read(), outbound frames are enqueued with write_message()
+     * and drained by the transport's own TX task. One reader and any number
+     * of writers may operate concurrently; the single TX queue preserves
+     * Response/Event ordering.
      *
      * Methods return ESP_OK on success and an ESP_ERR_* code on failure.
      */
@@ -72,41 +82,52 @@ namespace sidp
         virtual void end_read(std::uint8_t *buf_return) noexcept = 0;
 
         /**
-         * @brief Writes one complete SIDP message.
+         * @brief Enqueues one complete SIDP message for transmission.
          *
-         * This is a non-blocking enqueue operation. On success the transport
-         * owns a copy of the message and the caller may immediately reuse its
-         * buffer. Call flush_write() to drive and wait for transmission.
+         * The message is copied into the transport's TX queue; the transport
+         * owns the copy and the caller may immediately reuse its buffer. The
+         * transport's TX task serializes queued frames onto the wire in FIFO
+         * order. Waits up to TX_ENQUEUE_TIMEOUT_MS for queue space: session
+         * responses and events must not be lost. Frames on a disconnected
+         * transport are dropped by the TX task.
          *
-         * @param message Complete SIDP message to send. The caller retains
-         *        ownership and may reuse it after this call returns.
+         * @param message Complete SIDP message to send.
          * @return ESP_OK on success.
          * @return ESP_ERR_INVALID_ARG if message is shorter than sizeof(msg_header_t).
          * @return ESP_ERR_INVALID_SIZE if message exceeds MAX_FRAME_SIZE.
-         * @return ESP_ERR_INVALID_STATE if a previously enqueued message is
-         *         still pending, or the transport is disconnected or not yet
-         *         initialized; any previously enqueued message is discarded.
-         * @return ESP_FAIL for another underlying transport failure.
+         * @return ESP_ERR_INVALID_STATE if the transport is not yet initialized.
+         * @return ESP_ERR_TIMEOUT if the queue stayed full for the whole
+         *         timeout; the frame is lost.
          */
         [[nodiscard]] virtual esp_err_t write_message(std::span<const std::uint8_t> message) noexcept = 0;
 
         /**
-         * @brief Drives and waits for all currently enqueued output.
+         * @brief Enqueues one expendable SIDP message (e.g. a LOG frame).
          *
-         * If the call times out, unsent data remains queued and a later call
-         * may continue flushing it. write_message() returns
-         * @c ESP_ERR_INVALID_STATE until the queued message has been
-         * completely flushed. A disconnected transport discards any pending
-         * output instead.
+         * Never blocks: when the TX queue is full the frame is dropped and
+         * counted in tx_dropped_frames().
+         *
+         * @param message Complete SIDP message to send.
+         * @return ESP_OK when the message was enqueued.
+         * @return ESP_ERR_INVALID_ARG if message is shorter than sizeof(msg_header_t).
+         * @return ESP_ERR_INVALID_SIZE if message exceeds MAX_FRAME_SIZE.
+         * @return ESP_ERR_INVALID_STATE if the transport is not yet initialized.
+         * @return ESP_ERR_NO_MEM when the queue was full and the frame was dropped.
+         */
+        [[nodiscard]] virtual esp_err_t write_message_log(std::span<const std::uint8_t> message) noexcept = 0;
+
+        /**
+         * @brief Waits until every queued frame has left the wire.
          *
          * @param timeout_ms Maximum wait in milliseconds, or WAIT_FOREVER.
-         * @return ESP_OK when no output remains pending.
-         * @return ESP_ERR_TIMEOUT if output remains when the timeout expires.
-         * @return ESP_ERR_INVALID_STATE if the transport is disconnected or
-         *         not yet initialized.
-         * @return ESP_FAIL for another underlying transport failure.
+         * @return ESP_OK when the TX queue is drained.
+         * @return ESP_ERR_TIMEOUT if frames remain after the timeout expires.
+         * @return ESP_ERR_INVALID_STATE if the transport is not yet initialized.
          */
         [[nodiscard]] virtual esp_err_t flush_write(std::uint32_t timeout_ms) noexcept = 0;
+
+        /** @brief Number of frames dropped by write_message_expendable() so far. */
+        [[nodiscard]] virtual std::uint32_t tx_dropped_frames() const noexcept = 0;
 
         /**
          * @brief Reports whether the transport can currently exchange data.

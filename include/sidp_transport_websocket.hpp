@@ -62,18 +62,15 @@ namespace sidp
          */
         [[nodiscard]] esp_err_t init(const esp_websocket_client_config_t &config) noexcept;
 
-        /** @copydoc transport_intf::write_message */
-        [[nodiscard]] esp_err_t write_message(std::span<const std::uint8_t> message) noexcept override;
-
-        /** @copydoc transport_intf::flush_write */
-        [[nodiscard]] esp_err_t flush_write(std::uint32_t timeout_ms) noexcept override;
-
         /** @copydoc transport_intf::is_open */
         [[nodiscard]] bool is_open() const noexcept override;
 
     private:
         websocket_transport() noexcept = default;
         ~websocket_transport() override = default;
+
+        /** @brief Maximum blocking interval for one send_bin() call. */
+        inline static constexpr std::uint32_t WS_SEND_TIMEOUT_MS = 5000;
 
         /** @brief Handles events from esp_websocket_client. */
         static void websocket_event_handler(void *handler_arg, esp_event_base_t event_base, std::int32_t event_id, void *event_data) noexcept;
@@ -84,14 +81,12 @@ namespace sidp
         /** @brief Clears the currently staged message. */
         void reset_staging() noexcept;
 
-        /** @brief Discards pending output after a disconnect. */
-        void discard_pending_tx() noexcept;
+        /** @copydoc packet_queue_transport::deliver_tx_frame */
+        [[nodiscard]] bool deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept override;
 
         esp_websocket_client_handle_t client = nullptr;
         std::uint8_t *staging_buffer = nullptr;
-        std::uint8_t *tx_buffer = nullptr;
         std::size_t staging_received = 0;
-        std::size_t tx_size = 0;
         bool staging_active = false;
         bool staging_discarded = false;
         bool initialized = false;

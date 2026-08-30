@@ -22,17 +22,9 @@ namespace sidp
             return ESP_ERR_NO_MEM;
         }
 
-        auto *output_buffer = static_cast<std::uint8_t *>(heap_caps_malloc(MAX_FRAME_SIZE, MALLOC_CAP_SPIRAM));
-        if (output_buffer == nullptr) {
-            ESP_LOGE(TAG, "init: output buffer allocation failed");
-            heap_caps_free(input_buffer);
-            return ESP_ERR_NO_MEM;
-        }
-
-        const int queue_result = create_packet_queue();
+        const esp_err_t queue_result = create_queues();
         if (queue_result != ESP_OK) {
-            ESP_LOGE(TAG, "init: rx queue creation failed");
-            heap_caps_free(output_buffer);
+            ESP_LOGE(TAG, "init: queue creation failed");
             heap_caps_free(input_buffer);
             return queue_result;
         }
@@ -45,8 +37,7 @@ namespace sidp
         esp_websocket_client_handle_t websocket_client = esp_websocket_client_init(&client_config);
         if (websocket_client == nullptr) {
             ESP_LOGE(TAG, "init: esp_websocket_client_init failed");
-            destroy_packet_queue();
-            heap_caps_free(output_buffer);
+            destroy_queues();
             heap_caps_free(input_buffer);
             return ESP_ERR_INVALID_ARG;
         }
@@ -54,15 +45,13 @@ namespace sidp
         if (esp_websocket_register_events(websocket_client, WEBSOCKET_EVENT_DATA, websocket_event_handler, this) != ESP_OK) {
             ESP_LOGE(TAG, "init: event handler registration failed");
             esp_websocket_client_destroy(websocket_client);
-            destroy_packet_queue();
-            heap_caps_free(output_buffer);
+            destroy_queues();
             heap_caps_free(input_buffer);
             return ESP_FAIL;
         }
 
         client = websocket_client;
         staging_buffer = input_buffer;
-        tx_buffer = output_buffer;
         initialized = true;
 
         if (esp_websocket_client_start(client) != ESP_OK) {
@@ -72,65 +61,41 @@ namespace sidp
             initialized = false;
             client = nullptr;
             staging_buffer = nullptr;
-            tx_buffer = nullptr;
-            destroy_packet_queue();
-            heap_caps_free(output_buffer);
+            destroy_queues();
             heap_caps_free(input_buffer);
             return ESP_FAIL;
+        }
+
+        const esp_err_t task_result = spawn_tx_task("sidp_tx_ws");
+        if (task_result != ESP_OK) {
+            ESP_LOGE(TAG, "init: tx task spawn failed");
+            esp_websocket_unregister_events(websocket_client, WEBSOCKET_EVENT_DATA, websocket_event_handler);
+            esp_websocket_client_destroy(websocket_client);
+            initialized = false;
+            client = nullptr;
+            staging_buffer = nullptr;
+            destroy_queues();
+            heap_caps_free(input_buffer);
+            return task_result;
         }
 
         ESP_LOGI(TAG, "init: websocket transport started");
         return ESP_OK;
     }
 
-    esp_err_t websocket_transport::write_message(std::span<const std::uint8_t> message) noexcept
+    bool websocket_transport::deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept
     {
         if (!is_open()) {
-            discard_pending_tx();
-            return ESP_ERR_INVALID_STATE;
+            return false;
         }
-        if (message.size() < sizeof(msg_header_t)) {
-            return ESP_ERR_INVALID_ARG;
+        const int sent = esp_websocket_client_send_bin(client, reinterpret_cast<const char *>(frame.data()),
+                                                       static_cast<int>(frame.size()), timeout_to_ticks(WS_SEND_TIMEOUT_MS));
+        if (sent == static_cast<int>(frame.size())) {
+            return true;
         }
-        if (message.size() > MAX_FRAME_SIZE) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        if (tx_size != 0) {
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        std::memcpy(tx_buffer, message.data(), message.size());
-        tx_size = message.size();
-        return ESP_OK;
-    }
-
-    esp_err_t websocket_transport::flush_write(std::uint32_t timeout_ms) noexcept
-    {
-        if (tx_size == 0) {
-            return ESP_OK;
-        }
-        if (!is_open()) {
-            discard_pending_tx();
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        const int sent =
-            esp_websocket_client_send_bin(client, reinterpret_cast<const char *>(tx_buffer), static_cast<int>(tx_size), timeout_to_ticks(timeout_ms));
-        if (sent == static_cast<int>(tx_size)) {
-            discard_pending_tx();
-            return ESP_OK;
-        }
-        if (!is_open()) {
-            discard_pending_tx();
-            return ESP_ERR_INVALID_STATE;
-        }
-        if (sent < 0) {
-            ESP_LOGE(TAG, "flush_write: ws send failed: %d", sent);
-            return ESP_ERR_TIMEOUT;
-        }
-
-        discard_pending_tx();
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "deliver_tx_frame: send failed (%d of %u bytes, open=%d)", sent,
+                 static_cast<unsigned>(frame.size()), is_open());
+        return false;
     }
 
     bool websocket_transport::is_open() const noexcept
@@ -151,6 +116,7 @@ namespace sidp
             return;
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGE(TAG, "websocket_event_handler: websocket disconnected");
+            static_cast<websocket_transport *>(handler_arg)->drain_tx();
             return;
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGE(TAG, "websocket_event_handler: websocket error event");
@@ -231,14 +197,6 @@ namespace sidp
         staging_received = 0;
         staging_active = false;
         staging_discarded = false;
-    }
-
-    void websocket_transport::discard_pending_tx() noexcept
-    {
-        if (tx_size != 0) {
-            ESP_LOGE(TAG, "discard_pending_tx: discarding %u pending tx bytes", static_cast<unsigned>(tx_size));
-        }
-        tx_size = 0;
     }
 
 }

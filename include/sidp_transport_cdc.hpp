@@ -85,12 +85,6 @@ namespace sidp
          */
         [[nodiscard]] esp_err_t init(tinyusb_cdcacm_itf_t cdc_port) noexcept;
 
-        /** @copydoc transport_intf::write_message */
-        [[nodiscard]] esp_err_t write_message(std::span<const std::uint8_t> message) noexcept override;
-
-        /** @copydoc transport_intf::flush_write */
-        [[nodiscard]] esp_err_t flush_write(std::uint32_t timeout_ms) noexcept override;
-
         /**
          * @brief Reports whether the transport can currently exchange data.
          *
@@ -107,10 +101,13 @@ namespace sidp
         /** @brief Maximum SLIP size when every SIDP byte requires escaping. */
         inline static constexpr std::size_t MAX_ENCODED_FRAME_SIZE = (MAX_FRAME_SIZE * 2u) + 2u;
 
+        /** @brief Maximum blocking interval for one frame's CDC flush cycle. */
+        inline static constexpr std::uint32_t TX_SEND_TIMEOUT_MS = 5000;
+
         /** @brief Maximum bytes fetched from the CDC interface per read. */
         inline static constexpr std::size_t RX_READ_CHUNK_SIZE = 64;
 
-        /** @brief Maximum blocking interval before flush_write() rechecks liveness. */
+        /** @brief Maximum blocking interval before the TX task rechecks liveness. */
         inline static constexpr std::uint32_t FLUSH_WAIT_SLICE_MS = 10;
 
         /** @brief Per-operation deadline in monotonic milliseconds. */
@@ -148,8 +145,8 @@ namespace sidp
         /** @brief Resets decoded state while retaining raw buffered input. */
         void reset_frame_state() noexcept;
 
-        /** @brief Discards any partially flushed TX message. */
-        void discard_pending_tx() noexcept;
+        /** @copydoc packet_queue_transport::deliver_tx_frame */
+        [[nodiscard]] bool deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept override;
 
         /** @brief Encodes one SIDP message into the preallocated TX buffer. */
         void encode_message(std::span<const std::uint8_t> message) noexcept;
