@@ -1,6 +1,6 @@
 #include "sidp_transport_cdc.hpp"
 
-#include <cerrno>
+#include "esp_log.h"
 
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -8,24 +8,28 @@
 namespace sidp
 {
 
-    int cdc_slip_transport::init(tinyusb_cdcacm_itf_t port) noexcept
+    esp_err_t cdc_slip_transport::init(tinyusb_cdcacm_itf_t port) noexcept
     {
         if (initialized) {
-            return -EALREADY;
+            ESP_LOGE(TAG, "init: cdc transport already initialized");
+            return ESP_ERR_INVALID_STATE;
         }
 
         const int port_index = static_cast<int>(port);
         if (port_index < 0 || port_index >= TINYUSB_CDC_ACM_MAX) {
-            return -EINVAL;
+            ESP_LOGE(TAG, "init: invalid CDC port %d", port_index);
+            return ESP_ERR_INVALID_ARG;
         }
 
         auto *buffers = static_cast<std::uint8_t *>(heap_caps_malloc(MAX_FRAME_SIZE + MAX_ENCODED_FRAME_SIZE, MALLOC_CAP_SPIRAM));
         if (buffers == nullptr) {
-            return -ENOMEM;
+            ESP_LOGE(TAG, "init: buffer allocation failed");
+            return ESP_ERR_NO_MEM;
         }
 
         const int queue_result = create_packet_queue();
-        if (queue_result != 0) {
+        if (queue_result != ESP_OK) {
+            ESP_LOGE(TAG, "init: rx queue creation failed");
             heap_caps_free(buffers);
             return queue_result;
         }
@@ -44,53 +48,55 @@ namespace sidp
         };
         const esp_err_t result = tinyusb_cdcacm_init(&cdc_config);
         if (result != ESP_OK) {
+            ESP_LOGE(TAG, "init: tinyusb_cdcacm_init failed: %s", esp_err_to_name(result));
             initialized = false;
             cdc_port = TINYUSB_CDC_ACM_0;
             frame_buffer = nullptr;
             tx_buffer = nullptr;
             destroy_packet_queue();
             heap_caps_free(buffers);
-            return esp_error_to_errno(result);
+            return map_esp_error(result);
         }
 
-        return 0;
+        ESP_LOGI(TAG, "init: cdc transport ready (itf=%d)", port_index);
+        return ESP_OK;
     }
 
-    int cdc_slip_transport::write_message(std::span<const std::uint8_t> message) noexcept
+    esp_err_t cdc_slip_transport::write_message(std::span<const std::uint8_t> message) noexcept
     {
         if (!is_open()) {
             discard_pending_tx();
-            return -ENOTCONN;
+            return ESP_ERR_INVALID_STATE;
         }
         if (message.size() < sizeof(msg_header_t)) {
-            return -EINVAL;
+            return ESP_ERR_INVALID_ARG;
         }
         if (message.size() > MAX_FRAME_SIZE) {
-            return -EMSGSIZE;
+            return ESP_ERR_INVALID_SIZE;
         }
         if (tx_size != 0) {
-            return -EBUSY;
+            return ESP_ERR_INVALID_STATE;
         }
 
         encode_message(message);
         return 0;
     }
 
-    int cdc_slip_transport::flush_write(std::uint32_t timeout_ms) noexcept
+    esp_err_t cdc_slip_transport::flush_write(std::uint32_t timeout_ms) noexcept
     {
         if (tx_size == 0) {
             return 0;
         }
         if (!is_open()) {
             discard_pending_tx();
-            return -ENOTCONN;
+            return ESP_ERR_INVALID_STATE;
         }
 
         const deadline_t deadline{now_ms(), timeout_ms};
         while (tx_offset < tx_size) {
             if (!is_open()) {
                 discard_pending_tx();
-                return -ENOTCONN;
+                return ESP_ERR_INVALID_STATE;
             }
 
             const std::size_t queued = tinyusb_cdcacm_write_queue(cdc_port, tx_buffer + tx_offset, tx_size - tx_offset);
@@ -99,25 +105,25 @@ namespace sidp
                 continue;
             }
 
-            const int flush_result = flush_cdc_once(deadline);
-            if (flush_result == -ENOTCONN) {
+            const esp_err_t flush_result = flush_cdc_once(deadline);
+            if (flush_result == ESP_ERR_INVALID_STATE) {
                 discard_pending_tx();
                 return flush_result;
             }
-            if (flush_result != 0 && flush_result != -EAGAIN) {
+            if (flush_result != ESP_OK && flush_result != ESP_ERR_NOT_FINISHED) {
                 return flush_result;
             }
         }
 
         while (true) {
-            const int flush_result = flush_cdc_once(deadline);
-            if (flush_result == -EAGAIN) {
+            const esp_err_t flush_result = flush_cdc_once(deadline);
+            if (flush_result == ESP_ERR_NOT_FINISHED) {
                 continue;
             }
-            if (flush_result == -ENOTCONN) {
+            if (flush_result == ESP_ERR_INVALID_STATE) {
                 discard_pending_tx();
             }
-            if (flush_result != 0) {
+            if (flush_result != ESP_OK) {
                 return flush_result;
             }
             break;
@@ -125,11 +131,14 @@ namespace sidp
 
         tx_size = 0;
         tx_offset = 0;
-        return 0;
+        return ESP_OK;
     }
 
     void cdc_slip_transport::discard_pending_tx() noexcept
     {
+        if (tx_size != 0) {
+            ESP_LOGE(TAG, "discard_pending_tx: discarding %u pending tx bytes", static_cast<unsigned>(tx_size));
+        }
         tx_size = 0;
         tx_offset = 0;
     }
@@ -152,22 +161,17 @@ namespace sidp
         }
     }
 
-    int cdc_slip_transport::esp_error_to_errno(esp_err_t error) noexcept
+    esp_err_t cdc_slip_transport::map_esp_error(esp_err_t error) noexcept
     {
         switch (error) {
-        case ESP_OK:
-            return 0;
         case ESP_ERR_INVALID_ARG:
-            return -EINVAL;
         case ESP_ERR_NO_MEM:
-            return -ENOMEM;
         case ESP_ERR_TIMEOUT:
         case ESP_ERR_NOT_FINISHED:
-            return -ETIMEDOUT;
         case ESP_ERR_INVALID_STATE:
-            return -ENOTCONN;
+            return error;
         default:
-            return -EIO;
+            return ESP_FAIL;
         }
     }
 
@@ -220,7 +224,12 @@ namespace sidp
                 return false;
             }
 
-            if (frame_discarded || escape_pending) {
+            if (escape_pending) {
+                ESP_LOGE(TAG, "consume_input_byte: slip frame aborted: ESC before END");
+                reset_frame_state();
+                return false;
+            }
+            if (frame_discarded) {
                 reset_frame_state();
                 return false;
             }
@@ -242,6 +251,7 @@ namespace sidp
             } else if (byte == SLIP_ESC_ESC) {
                 append_decoded_byte(SLIP_ESC);
             } else {
+                ESP_LOGE(TAG, "consume_input_byte: slip frame dropped: invalid escape 0x%02x", byte);
                 frame_discarded = true;
             }
             return false;
@@ -258,6 +268,7 @@ namespace sidp
     void cdc_slip_transport::append_decoded_byte(std::uint8_t byte) noexcept
     {
         if (frame_size == MAX_FRAME_SIZE) {
+            ESP_LOGE(TAG, "append_decoded_byte: slip frame dropped: exceeds frame size");
             frame_discarded = true;
             return;
         }
@@ -303,7 +314,7 @@ namespace sidp
     int cdc_slip_transport::flush_cdc_once(const deadline_t &deadline) noexcept
     {
         if (!is_open()) {
-            return -ENOTCONN;
+            return ESP_ERR_INVALID_STATE;
         }
 
         const std::uint32_t remaining_ms = remaining_timeout(deadline);
@@ -314,18 +325,19 @@ namespace sidp
 
         const esp_err_t result = tinyusb_cdcacm_write_flush(cdc_port, timeout_to_ticks(wait_ms));
         if (result == ESP_OK) {
-            return 0;
+            return ESP_OK;
         }
         if (!is_open()) {
-            return -ENOTCONN;
+            return ESP_ERR_INVALID_STATE;
         }
         if (result != ESP_ERR_TIMEOUT && result != ESP_ERR_NOT_FINISHED) {
-            return esp_error_to_errno(result);
+            return map_esp_error(result);
         }
         if (deadline.timeout_ms != WAIT_FOREVER && remaining_timeout(deadline) == 0) {
-            return -ETIMEDOUT;
+            ESP_LOGE(TAG, "flush_cdc_once: cdc flush timeout");
+            return ESP_ERR_TIMEOUT;
         }
-        return -EAGAIN;
+        return ESP_ERR_NOT_FINISHED; // slice expired: retry
     }
 
 }

@@ -74,23 +74,22 @@ namespace sidp
          * @brief Initializes and binds the esp_tinyusb CDC-ACM interface.
          *
          * Must be called exactly once, before any other method. A second call
-         * returns @c -EALREADY and changes nothing.
+         * returns @c ESP_ERR_INVALID_STATE and changes nothing.
          *
          * @param cdc_port CDC interface used for SIDP.
-         * @return 0 on success.
-         * @return -EINVAL if cdc_port is not enabled by the current build.
-         * @return -EALREADY if already initialized.
-         * @return -ENOMEM if initialization memory cannot be allocated.
-         * @return -ENOTCONN if the shared TinyUSB device driver is unavailable.
-         * @return -EIO if CDC initialization otherwise fails.
+         * @return ESP_OK on success.
+         * @return ESP_ERR_INVALID_ARG if cdc_port is not enabled by the current build.
+         * @return ESP_ERR_INVALID_STATE if already initialized.
+         * @return ESP_ERR_NO_MEM if initialization memory cannot be allocated.
+         * @return ESP_FAIL if CDC initialization otherwise fails.
          */
-        [[nodiscard]] int init(tinyusb_cdcacm_itf_t cdc_port) noexcept;
+        [[nodiscard]] esp_err_t init(tinyusb_cdcacm_itf_t cdc_port) noexcept;
 
         /** @copydoc transport_intf::write_message */
-        [[nodiscard]] int write_message(std::span<const std::uint8_t> message) noexcept override;
+        [[nodiscard]] esp_err_t write_message(std::span<const std::uint8_t> message) noexcept override;
 
         /** @copydoc transport_intf::flush_write */
-        [[nodiscard]] int flush_write(std::uint32_t timeout_ms) noexcept override;
+        [[nodiscard]] esp_err_t flush_write(std::uint32_t timeout_ms) noexcept override;
 
         /**
          * @brief Reports whether the transport can currently exchange data.
@@ -123,8 +122,8 @@ namespace sidp
         /** @brief Routes an esp_tinyusb callback to the singleton. */
         static void cdc_event_callback(int itf, cdcacm_event_t *event) noexcept;
 
-        /** @brief Maps an ESP-IDF result to zero or a negative errno value. */
-        [[nodiscard]] static int esp_error_to_errno(esp_err_t error) noexcept;
+        /** @brief Normalizes an ESP-IDF result to the transport error codes. */
+        [[nodiscard]] static esp_err_t map_esp_error(esp_err_t error) noexcept;
 
         /** @brief Returns monotonic milliseconds modulo 2^32. */
         [[nodiscard]] static std::uint32_t now_ms() noexcept;
@@ -162,7 +161,7 @@ namespace sidp
         void append_escaped_tx_byte(std::uint8_t byte) noexcept;
 
         /** @brief Runs one bounded esp_tinyusb transmit flush. */
-        [[nodiscard]] int flush_cdc_once(const deadline_t &deadline) noexcept;
+        [[nodiscard]] esp_err_t flush_cdc_once(const deadline_t &deadline) noexcept;
 
         tinyusb_cdcacm_itf_t cdc_port = TINYUSB_CDC_ACM_0;
         std::uint8_t *frame_buffer = nullptr;
@@ -174,6 +173,7 @@ namespace sidp
         bool initialized = false;
         bool receiving_frame = false;
         bool escape_pending = false;
+        static constexpr char TAG[] = "sidp_cdc";
     };
 
 }

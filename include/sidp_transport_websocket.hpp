@@ -54,19 +54,19 @@ namespace sidp
          * lifetime required by esp_websocket_client.
          *
          * @param config Espressif WebSocket client configuration.
-         * @return 0 on success.
-         * @return -EALREADY if already initialized.
-         * @return -EINVAL if the configuration is invalid.
-         * @return -ENOMEM if initialization memory cannot be allocated.
-         * @return -EIO if the WebSocket client cannot be started.
+         * @return ESP_OK on success.
+         * @return ESP_ERR_INVALID_STATE if already initialized.
+         * @return ESP_ERR_INVALID_ARG if the configuration is invalid.
+         * @return ESP_ERR_NO_MEM if initialization memory cannot be allocated.
+         * @return ESP_FAIL if the WebSocket client cannot be started.
          */
-        [[nodiscard]] int init(const esp_websocket_client_config_t &config) noexcept;
+        [[nodiscard]] esp_err_t init(const esp_websocket_client_config_t &config) noexcept;
 
         /** @copydoc transport_intf::write_message */
-        [[nodiscard]] int write_message(std::span<const std::uint8_t> message) noexcept override;
+        [[nodiscard]] esp_err_t write_message(std::span<const std::uint8_t> message) noexcept override;
 
         /** @copydoc transport_intf::flush_write */
-        [[nodiscard]] int flush_write(std::uint32_t timeout_ms) noexcept override;
+        [[nodiscard]] esp_err_t flush_write(std::uint32_t timeout_ms) noexcept override;
 
         /** @copydoc transport_intf::is_open */
         [[nodiscard]] bool is_open() const noexcept override;
@@ -95,6 +95,8 @@ namespace sidp
         bool staging_active = false;
         bool staging_discarded = false;
         bool initialized = false;
+
+        static constexpr char TAG[] = "sidp_ws";
     };
 
 }

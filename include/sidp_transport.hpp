@@ -1,11 +1,12 @@
 #pragma once
 
 #include <array>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <span>
+
+#include "esp_err.h"
 
 #include "sidp_defs.hpp"
 
@@ -25,9 +26,7 @@ namespace sidp
      * One reader and one writer may operate concurrently. Multiple writers
      * must be serialized by the caller so Response/Event ordering is retained.
      *
-     * Methods return zero on success and a negative errno value on failure.
-     * Implementations return errors directly and do not modify the global
-     * @c errno variable.
+     * Methods return ESP_OK on success and an ESP_ERR_* code on failure.
      */
     class transport_intf
     {
@@ -53,15 +52,15 @@ namespace sidp
          * @param len_out Receives a value in [sizeof(msg_header_t),
          *        MAX_FRAME_SIZE] on success; set to zero on failure.
          * @param timeout_ms Maximum wait in milliseconds, or WAIT_FOREVER.
-         * @return 0 on success.
-         * @return -EINVAL if an output pointer is null.
-         * @return -ETIMEDOUT if no complete message arrives before timeout.
-         * @return -ENOTCONN if the transport is disconnected or not yet
-         *         initialized.
-         * @return -ENOBUFS if the receive queue overflowed.
-         * @return -EIO for another underlying transport failure.
+         * @return ESP_OK on success.
+         * @return ESP_ERR_INVALID_ARG if an output pointer is null.
+         * @return ESP_ERR_TIMEOUT if no complete message arrives before timeout.
+         * @return ESP_ERR_INVALID_STATE if the transport is disconnected or
+         *         not yet initialized.
+         * @return ESP_ERR_NO_MEM if the receive queue overflowed.
+         * @return ESP_FAIL for another underlying transport failure.
          */
-        [[nodiscard]] virtual int start_read(std::uint8_t **buf_out, std::size_t *len_out, std::uint32_t timeout_ms) noexcept = 0;
+        [[nodiscard]] virtual esp_err_t start_read(std::uint8_t **buf_out, std::size_t *len_out, std::uint32_t timeout_ms) noexcept = 0;
 
         /**
          * @brief Returns a message buffer acquired by start_read().
@@ -81,32 +80,33 @@ namespace sidp
          *
          * @param message Complete SIDP message to send. The caller retains
          *        ownership and may reuse it after this call returns.
-         * @return 0 on success.
-         * @return -EINVAL if message is shorter than sizeof(msg_header_t).
-         * @return -EMSGSIZE if message exceeds MAX_FRAME_SIZE.
-         * @return -EBUSY if a previously enqueued message is still pending.
-         * @return -ENOTCONN if the transport is disconnected or not yet
+         * @return ESP_OK on success.
+         * @return ESP_ERR_INVALID_ARG if message is shorter than sizeof(msg_header_t).
+         * @return ESP_ERR_INVALID_SIZE if message exceeds MAX_FRAME_SIZE.
+         * @return ESP_ERR_INVALID_STATE if a previously enqueued message is
+         *         still pending, or the transport is disconnected or not yet
          *         initialized; any previously enqueued message is discarded.
-         * @return -EIO for another underlying transport failure.
+         * @return ESP_FAIL for another underlying transport failure.
          */
-        [[nodiscard]] virtual int write_message(std::span<const std::uint8_t> message) noexcept = 0;
+        [[nodiscard]] virtual esp_err_t write_message(std::span<const std::uint8_t> message) noexcept = 0;
 
         /**
          * @brief Drives and waits for all currently enqueued output.
          *
          * If the call times out, unsent data remains queued and a later call
-         * may continue flushing it. write_message() returns @c -EBUSY until
-         * the queued message has been completely flushed. A disconnected
-         * transport discards any pending output instead.
+         * may continue flushing it. write_message() returns
+         * @c ESP_ERR_INVALID_STATE until the queued message has been
+         * completely flushed. A disconnected transport discards any pending
+         * output instead.
          *
          * @param timeout_ms Maximum wait in milliseconds, or WAIT_FOREVER.
-         * @return 0 when no output remains pending.
-         * @return -ETIMEDOUT if output remains when the timeout expires.
-         * @return -ENOTCONN if the transport is disconnected or not yet
-         *         initialized.
-         * @return -EIO for another underlying transport failure.
+         * @return ESP_OK when no output remains pending.
+         * @return ESP_ERR_TIMEOUT if output remains when the timeout expires.
+         * @return ESP_ERR_INVALID_STATE if the transport is disconnected or
+         *         not yet initialized.
+         * @return ESP_FAIL for another underlying transport failure.
          */
-        [[nodiscard]] virtual int flush_write(std::uint32_t timeout_ms) noexcept = 0;
+        [[nodiscard]] virtual esp_err_t flush_write(std::uint32_t timeout_ms) noexcept = 0;
 
         /**
          * @brief Reports whether the transport can currently exchange data.
