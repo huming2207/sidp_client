@@ -718,7 +718,7 @@ int main()
         CHECK(session.get_stop_id() == 0);
     }
 
-    // ---- Test 9: RESET_HALT resets stop generation, sends STOPPED with reason ----
+    // ---- Test 9: RESET_HALT advances stop generation and reports RESET ----
     {
         tx_frames.clear();
         mock_target_t target;
@@ -744,6 +744,7 @@ int main()
         const auto view = parse_frame(1);
         auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
         CHECK(stopped->stop_id == 2); // reset is a new stop generation in the same session
+        CHECK(stopped->reason == STOP_RESET);
         CHECK(session.get_stop_id() == 2);
         CHECK(target.reset_calls == 1);
         CHECK(target.last_reset_kind == RESET_SYSTEM);

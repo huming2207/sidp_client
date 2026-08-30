@@ -965,6 +965,7 @@ namespace sidp
         clear_debug_state();
         clear_run_tracking();
         enter_halted(stop);
+        pending_reason = STOP_RESET;
         send_response(OP_RESET_HALT, request_id, STATUS_OK);
         emit_pending_stopped();
     }
