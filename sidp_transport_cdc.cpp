@@ -24,22 +24,13 @@ namespace sidp
             return -ENOMEM;
         }
 
-        RingbufHandle_t rx_ring_buffer = xRingbufferCreateWithCaps(RX_PACKET_RING_BUFFER_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
-        if (rx_ring_buffer == nullptr) {
+        const int queue_result = create_packet_queue();
+        if (queue_result != 0) {
             heap_caps_free(buffers);
-            return -ENOMEM;
-        }
-
-        EventGroupHandle_t event_group = xEventGroupCreate();
-        if (event_group == nullptr) {
-            vRingbufferDeleteWithCaps(rx_ring_buffer);
-            heap_caps_free(buffers);
-            return -ENOMEM;
+            return queue_result;
         }
 
         cdc_port = port;
-        events = event_group;
-        ring_buffer = rx_ring_buffer;
         frame_buffer = buffers;
         tx_buffer = buffers + MAX_FRAME_SIZE;
         initialized = true;
@@ -55,50 +46,14 @@ namespace sidp
         if (result != ESP_OK) {
             initialized = false;
             cdc_port = TINYUSB_CDC_ACM_0;
-            events = nullptr;
-            ring_buffer = nullptr;
             frame_buffer = nullptr;
             tx_buffer = nullptr;
-            vEventGroupDelete(event_group);
-            vRingbufferDeleteWithCaps(rx_ring_buffer);
+            destroy_packet_queue();
             heap_caps_free(buffers);
             return esp_error_to_errno(result);
         }
 
         return 0;
-    }
-
-    int cdc_slip_transport::start_read(std::uint8_t **buf_out, std::size_t *len_out, std::uint32_t timeout_ms) noexcept
-    {
-        if (buf_out == nullptr || len_out == nullptr) {
-            return -EINVAL;
-        }
-
-        *buf_out = nullptr;
-        *len_out = 0;
-        if (!initialized) {
-            return -ENOTCONN;
-        }
-        if ((xEventGroupClearBits(events, EVENT_RX_OVERFLOW) & EVENT_RX_OVERFLOW) != 0) {
-            return -ENOBUFS;
-        }
-
-        std::size_t packet_size = 0;
-        auto *packet = static_cast<std::uint8_t *>(xRingbufferReceive(ring_buffer, &packet_size, timeout_to_ticks(timeout_ms)));
-        if (packet == nullptr) {
-            return is_open() ? -ETIMEDOUT : -ENOTCONN;
-        }
-
-        *buf_out = packet;
-        *len_out = packet_size;
-        return 0;
-    }
-
-    void cdc_slip_transport::end_read(std::uint8_t *buf_return) noexcept
-    {
-        if (buf_return != nullptr && ring_buffer != nullptr) {
-            vRingbufferReturnItem(ring_buffer, buf_return);
-        }
     }
 
     int cdc_slip_transport::write_message(std::span<const std::uint8_t> message) noexcept
@@ -231,19 +186,6 @@ namespace sidp
         return elapsed < deadline.timeout_ms ? deadline.timeout_ms - elapsed : 0;
     }
 
-    TickType_t cdc_slip_transport::timeout_to_ticks(std::uint32_t timeout_ms) noexcept
-    {
-        if (timeout_ms == WAIT_FOREVER) {
-            return portMAX_DELAY;
-        }
-        if (timeout_ms == 0) {
-            return 0;
-        }
-
-        const TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
-        return ticks == 0 ? 1 : ticks;
-    }
-
     void cdc_slip_transport::drain_cdc_input() noexcept
     {
         if (!is_open()) {
@@ -263,18 +205,7 @@ namespace sidp
                     continue;
                 }
 
-                const std::span<const std::uint8_t> packet(frame_buffer, frame_size);
-                if (!transport_intf::is_valid_message_size(frame_size) || !crc32_hasher::verify_message_crc(packet)) {
-                    reset_frame_state();
-                    continue;
-                }
-
-                if (xRingbufferSend(ring_buffer, frame_buffer, frame_size, 0) != pdTRUE) {
-                    reset_frame_state();
-                    xEventGroupSetBits(events, EVENT_RX_OVERFLOW);
-                    continue;
-                }
-
+                deliver_packet(frame_buffer, frame_size);
                 reset_frame_state();
             }
         }

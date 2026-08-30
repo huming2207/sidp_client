@@ -25,19 +25,11 @@ namespace sidp
             return -ENOMEM;
         }
 
-        RingbufHandle_t rx_ring_buffer = xRingbufferCreateWithCaps(RX_PACKET_RING_BUFFER_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
-        if (rx_ring_buffer == nullptr) {
+        const int queue_result = create_packet_queue();
+        if (queue_result != 0) {
             heap_caps_free(output_buffer);
             heap_caps_free(input_buffer);
-            return -ENOMEM;
-        }
-
-        EventGroupHandle_t event_group = xEventGroupCreate();
-        if (event_group == nullptr) {
-            vRingbufferDeleteWithCaps(rx_ring_buffer);
-            heap_caps_free(output_buffer);
-            heap_caps_free(input_buffer);
-            return -ENOMEM;
+            return queue_result;
         }
 
         esp_websocket_client_config_t client_config = config;
@@ -47,8 +39,7 @@ namespace sidp
 
         esp_websocket_client_handle_t websocket_client = esp_websocket_client_init(&client_config);
         if (websocket_client == nullptr) {
-            vEventGroupDelete(event_group);
-            vRingbufferDeleteWithCaps(rx_ring_buffer);
+            destroy_packet_queue();
             heap_caps_free(output_buffer);
             heap_caps_free(input_buffer);
             return -EINVAL;
@@ -56,69 +47,31 @@ namespace sidp
 
         if (esp_websocket_register_events(websocket_client, WEBSOCKET_EVENT_DATA, websocket_event_handler, this) != ESP_OK) {
             esp_websocket_client_destroy(websocket_client);
-            vEventGroupDelete(event_group);
-            vRingbufferDeleteWithCaps(rx_ring_buffer);
+            destroy_packet_queue();
             heap_caps_free(output_buffer);
             heap_caps_free(input_buffer);
             return -EIO;
         }
 
         client = websocket_client;
-        events = event_group;
-        ring_buffer = rx_ring_buffer;
         staging_buffer = input_buffer;
         tx_buffer = output_buffer;
         initialized = true;
 
         if (esp_websocket_client_start(client) != ESP_OK) {
-            initialized = false;
-            client = nullptr;
-            events = nullptr;
-            ring_buffer = nullptr;
-            staging_buffer = nullptr;
-            tx_buffer = nullptr;
             esp_websocket_unregister_events(websocket_client, WEBSOCKET_EVENT_DATA, websocket_event_handler);
             esp_websocket_client_destroy(websocket_client);
-            vEventGroupDelete(event_group);
-            vRingbufferDeleteWithCaps(rx_ring_buffer);
+            initialized = false;
+            client = nullptr;
+            staging_buffer = nullptr;
+            tx_buffer = nullptr;
+            destroy_packet_queue();
             heap_caps_free(output_buffer);
             heap_caps_free(input_buffer);
             return -EIO;
         }
 
         return 0;
-    }
-
-    int websocket_transport::start_read(std::uint8_t **buf_out, std::size_t *len_out, std::uint32_t timeout_ms) noexcept
-    {
-        if (buf_out == nullptr || len_out == nullptr) {
-            return -EINVAL;
-        }
-
-        *buf_out = nullptr;
-        *len_out = 0;
-        if (!initialized) {
-            return -ENOTCONN;
-        }
-        if ((xEventGroupClearBits(events, EVENT_RX_OVERFLOW) & EVENT_RX_OVERFLOW) != 0) {
-            return -ENOBUFS;
-        }
-
-        std::size_t packet_size = 0;
-        auto *packet = static_cast<std::uint8_t *>(xRingbufferReceive(ring_buffer, &packet_size, timeout_to_ticks(timeout_ms)));
-        if (packet == nullptr) {
-            return is_open() ? -ETIMEDOUT : -ENOTCONN;
-        }
-        *buf_out = packet;
-        *len_out = packet_size;
-        return 0;
-    }
-
-    void websocket_transport::end_read(std::uint8_t *buf_return) noexcept
-    {
-        if (buf_return != nullptr && ring_buffer != nullptr) {
-            vRingbufferReturnItem(ring_buffer, buf_return);
-        }
     }
 
     int websocket_transport::write_message(std::span<const std::uint8_t> message) noexcept
@@ -188,7 +141,7 @@ namespace sidp
 
     void websocket_transport::handle_data(const esp_websocket_event_data_t &data) noexcept
     {
-        if (!initialized || events == nullptr) {
+        if (!initialized) {
             return;
         }
         if (data.payload_len < 0 || data.payload_offset < 0 || data.data_len < 0 ||
@@ -241,11 +194,7 @@ namespace sidp
 
         /* The frame carrying FIN is fully consumed: the message is done. */
         if (!staging_discarded) {
-            const std::span<const std::uint8_t> packet(staging_buffer, staging_received);
-            if (is_valid_message_size(staging_received) && crc32_hasher::verify_message_crc(packet) &&
-                xRingbufferSend(ring_buffer, staging_buffer, staging_received, 0) != pdTRUE) {
-                xEventGroupSetBits(events, EVENT_RX_OVERFLOW);
-            }
+            deliver_packet(staging_buffer, staging_received);
         }
         reset_staging();
     }
@@ -260,19 +209,6 @@ namespace sidp
     void websocket_transport::discard_pending_tx() noexcept
     {
         tx_size = 0;
-    }
-
-    TickType_t websocket_transport::timeout_to_ticks(std::uint32_t timeout_ms) noexcept
-    {
-        if (timeout_ms == WAIT_FOREVER) {
-            return portMAX_DELAY;
-        }
-        if (timeout_ms == 0) {
-            return 0;
-        }
-
-        const TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
-        return ticks == 0 ? 1 : ticks;
     }
 
 }

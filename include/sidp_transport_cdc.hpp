@@ -5,12 +5,10 @@
 #include <span>
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
-#include "freertos/ringbuf.h"
 #include "tinyusb.h"
 #include "tinyusb_cdc_acm.h"
 
-#include "sidp_transport.hpp"
+#include "sidp_transport_queue.hpp"
 
 namespace sidp
 {
@@ -33,18 +31,17 @@ namespace sidp
      * The CDC callback reads the interface in chunks of up to
      * RX_READ_CHUNK_SIZE bytes and feeds the SLIP decoder one byte at a
      * time. Decoder state persists across chunks, so frames may start and
-     * end anywhere inside a chunk or span chunk boundaries. At END it
-     * validates the SIDP packet size and CRC32, then queues the complete
-     * decoded packet as one ESP-IDF RINGBUF_TYPE_NOSPLIT item. Invalid
-     * packets never enter the consumer queue.
+     * end anywhere inside a chunk or span chunk boundaries. At END the
+     * complete decoded packet is validated and queued by the
+     * packet_queue_transport base. Invalid packets never enter the consumer
+     * queue.
      *
      * init() performs all allocations: the decoded RX and encoded TX storage
-     * (one contiguous block in PSRAM), the decoded-packet ring buffer (PSRAM),
-     * and one event group. No other method allocates. One reader and one
-     * writer may operate concurrently; callers must serialize multiple
-     * writers.
+     * (one contiguous block in PSRAM) plus the receive queue owned by the
+     * base. No other method allocates. One reader and one writer may operate
+     * concurrently; callers must serialize multiple writers.
      */
-    class cdc_slip_transport final : public transport_intf
+    class cdc_slip_transport final : public packet_queue_transport
     {
     public:
         /** @brief SLIP frame delimiter. */
@@ -89,12 +86,6 @@ namespace sidp
          */
         [[nodiscard]] int init(tinyusb_cdcacm_itf_t cdc_port) noexcept;
 
-        /** @copydoc transport_intf::start_read */
-        [[nodiscard]] int start_read(std::uint8_t **buf_out, std::size_t *len_out, std::uint32_t timeout_ms) noexcept override;
-
-        /** @copydoc transport_intf::end_read */
-        void end_read(std::uint8_t *buf_return) noexcept override;
-
         /** @copydoc transport_intf::write_message */
         [[nodiscard]] int write_message(std::span<const std::uint8_t> message) noexcept override;
 
@@ -120,14 +111,8 @@ namespace sidp
         /** @brief Maximum bytes fetched from the CDC interface per read. */
         inline static constexpr std::size_t RX_READ_CHUNK_SIZE = 64;
 
-        /** @brief Capacity of the decoded-packet ring buffer in PSRAM. */
-        inline static constexpr std::size_t RX_PACKET_RING_BUFFER_SIZE = 131072;
-
         /** @brief Maximum blocking interval before flush_write() rechecks liveness. */
         inline static constexpr std::uint32_t FLUSH_WAIT_SLICE_MS = 10;
-
-        /** @brief The decoded-packet ring buffer overflowed. */
-        inline static constexpr EventBits_t EVENT_RX_OVERFLOW = BIT0;
 
         /** @brief Per-operation deadline in monotonic milliseconds. */
         struct deadline_t {
@@ -146,9 +131,6 @@ namespace sidp
 
         /** @brief Computes remaining milliseconds for an operation. */
         [[nodiscard]] static std::uint32_t remaining_timeout(const deadline_t &deadline) noexcept;
-
-        /** @brief Converts milliseconds to FreeRTOS ticks without rounding down. */
-        [[nodiscard]] static TickType_t timeout_to_ticks(std::uint32_t timeout_ms) noexcept;
 
         /** @brief Reads, decodes, validates, and queues all available CDC bytes. */
         void drain_cdc_input() noexcept;
@@ -183,8 +165,6 @@ namespace sidp
         [[nodiscard]] int flush_cdc_once(const deadline_t &deadline) noexcept;
 
         tinyusb_cdcacm_itf_t cdc_port = TINYUSB_CDC_ACM_0;
-        EventGroupHandle_t events = nullptr;
-        RingbufHandle_t ring_buffer = nullptr;
         std::uint8_t *frame_buffer = nullptr;
         std::uint8_t *tx_buffer = nullptr;
         std::size_t frame_size = 0;
