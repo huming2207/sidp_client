@@ -40,7 +40,7 @@ namespace sidp
         std::uint32_t dfsr = 0;
         std::uint32_t dhcsr = 0;
         bool lockup = false;
-        /** @brief PC at halt, already normalized by the backend. */
+        /** @brief Raw architectural PC observed at halt. */
         std::uint32_t pc = 0;
         /** @brief Comparator index when an FPB/DWT comparator matched. */
         bool comparator_match = false;

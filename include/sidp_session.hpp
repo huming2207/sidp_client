@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -203,8 +202,10 @@ namespace sidp
         };
         /** @brief Executes the step-over sequence when halted on a sw breakpoint. */
         [[nodiscard]] step_over_t execute_step_over(run_action_t action, stop_detect_t &step_stop) noexcept;
-        /** @brief Reads the current PC through the backend. */
-        [[nodiscard]] bool read_current_pc(std::uint32_t &pc) noexcept;
+        [[nodiscard]] bool write_current_pc(std::uint32_t pc) noexcept;
+        void normalize_pc_in_register_blob(std::uint8_t *data, std::size_t size) const noexcept;
+        void update_step_over_after_register_write(const std::uint8_t *data, std::size_t size,
+                                                   std::uint16_t register_count) noexcept;
 
         // ---- Software breakpoint shadow table --------------------------------
         struct sw_bp_t {
@@ -216,11 +217,13 @@ namespace sidp
         };
 
         [[nodiscard]] bool sw_bp_apply(const std::span<const bp_entry_t> entries) noexcept;
+        [[nodiscard]] bool sw_bp_install_one(sw_bp_t &entry) noexcept;
         [[nodiscard]] bool sw_bp_restore_all() noexcept;
         [[nodiscard]] bool sw_bp_restore_one(sw_bp_t &entry) noexcept;
         void sw_bp_substitute_read(std::uint64_t address, std::uint8_t *data, std::size_t size) const noexcept;
         void sw_bp_write_overlap(std::uint64_t address, const std::uint8_t *data, std::size_t size) noexcept;
-        [[nodiscard]] const sw_bp_t *sw_bp_find_by_address(std::uint64_t address) const noexcept;
+        [[nodiscard]] sw_bp_t *sw_bp_find_by_address(std::uint64_t address) noexcept;
+        [[nodiscard]] sw_bp_t *sw_bp_find_by_halt_pc(std::uint64_t pc) noexcept;
 
         [[nodiscard]] bool storage_ready() const noexcept;
         /** @brief Frees every init()-allocated buffer and nulls the pointers. */
@@ -244,6 +247,8 @@ namespace sidp
         std::uint64_t active_run_to_address = 0;
         std::uint32_t hw_breakpoint_ids[MAX_HARDWARE_BREAKPOINTS]{};
         std::size_t hw_count = 0;
+        bool sw_step_over_pending = false;
+        std::uint64_t sw_step_over_address = 0;
 
         // Frame assembly scratch: the session is driven by one task, so a single
         // reusable frame buffer and data scratch replace 8 KiB stack arrays.

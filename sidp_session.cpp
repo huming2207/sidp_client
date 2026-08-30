@@ -650,6 +650,7 @@ namespace sidp
             send_response(OP_READ_REGISTERS, request_id, STATUS_SWD_ERROR);
             return;
         }
+        normalize_pc_in_register_blob(blob.data(), out_size);
         tx_frame_size = sizeof(msg_header_t) + sizeof(read_registers_response_t) + out_size;
 
         // Count actual entries in the blob (register_count == 0 requested the
@@ -691,6 +692,9 @@ namespace sidp
             send_backend_failure(OP_WRITE_REGISTERS, request_id, result, STATUS_SWD_ERROR);
             return;
         }
+        update_step_over_after_register_write(payload.data() + sizeof(write_registers_request_t),
+                                              payload.size() - sizeof(write_registers_request_t),
+                                              req.register_count);
         send_response(OP_WRITE_REGISTERS, request_id, STATUS_OK);
     }
 
@@ -1034,6 +1038,8 @@ namespace sidp
         stop_reason_t reason = STOP_UNKNOWN;
         std::uint32_t breakpoint_id = 0;
         std::uint64_t watchpoint_address = 0;
+        sw_step_over_pending = false;
+        sw_step_over_address = 0;
 
         constexpr std::uint32_t DFSR_HALTED = 1u << 0;
         constexpr std::uint32_t DFSR_BKPT = 1u << 1;
@@ -1047,17 +1053,18 @@ namespace sidp
             watchpoint_address = stop.watchpoint_address;
         } else if (run_to_active && stop.comparator_match && stop.pc == active_run_to_address) {
             reason = STOP_RUN_TO_ADDRESS;
-        } else if (stop.comparator_match || (stop.dfsr & DFSR_BKPT) != 0) {
-            const sw_bp_t *sw = sw_bp_find_by_address(stop.pc);
+        } else if (!stop.comparator_match && (stop.dfsr & DFSR_BKPT) != 0) {
+            sw_bp_t *sw = sw_bp_find_by_halt_pc(stop.pc);
+            reason = STOP_BREAKPOINT;
             if (sw != nullptr) {
-                // PC normalized to the breakpoint address: software breakpoint hit.
-                reason = STOP_BREAKPOINT;
                 breakpoint_id = sw->id;
-            } else {
-                reason = STOP_BREAKPOINT;
-                if (stop.comparator_match && stop.comparator_index < hw_count) {
-                    breakpoint_id = hw_breakpoint_ids[stop.comparator_index];
-                }
+                sw_step_over_pending = true;
+                sw_step_over_address = sw->address;
+            }
+        } else if (stop.comparator_match || (stop.dfsr & DFSR_BKPT) != 0) {
+            reason = STOP_BREAKPOINT;
+            if (stop.comparator_match && stop.comparator_index < hw_count) {
+                breakpoint_id = hw_breakpoint_ids[stop.comparator_index];
             }
         } else if (stop.fault) {
             reason = STOP_FAULT;
@@ -1099,6 +1106,7 @@ namespace sidp
             if (backend.read_regs({}, std::span<std::uint8_t>(pending_registers, SNAPSHOT_BLOB_CAPACITY), out_size) == ESP_OK &&
                 out_size <= SNAPSHOT_BLOB_CAPACITY) {
                 pending_registers_size = out_size;
+                normalize_pc_in_register_blob(pending_registers, pending_registers_size);
                 capture_stack_snapshot();
             }
         }
@@ -1196,47 +1204,90 @@ namespace sidp
         pending_stack_size = size;
     }
 
-    bool sidp_session::read_current_pc(std::uint32_t &pc) noexcept
+    bool sidp_session::write_current_pc(std::uint32_t pc) noexcept
     {
-        const register_id_t ids[1] = {ARM_REG_PC};
-        std::array<std::uint8_t, sizeof(register_value_t) + sizeof(pc)> out{};
-        std::size_t out_size = 0;
-        if (backend.read_regs(ids, out, out_size) != ESP_OK ||
-            out_size < sizeof(register_value_t) + sizeof(pc)) {
-            return false;
+        std::uint8_t data[sizeof(register_value_t) + sizeof(pc)]{};
+        auto *entry = reinterpret_cast<register_value_t *>(data);
+        entry->register_id = ARM_REG_PC;
+        entry->value_size = sizeof(pc);
+        entry->flags = REGISTER_VALUE_FLAG_NONE;
+        std::memcpy(data + sizeof(register_value_t), &pc, sizeof(pc));
+        return backend.write_regs(data, sizeof(data)) == ESP_OK;
+    }
+
+    void sidp_session::normalize_pc_in_register_blob(std::uint8_t *data, std::size_t size) const noexcept
+    {
+        if (!sw_step_over_pending) {
+            return;
         }
-        const auto *entry = reinterpret_cast<const register_value_t *>(out.data());
-        if (entry->register_id != ARM_REG_PC || entry->value_size != sizeof(pc)) {
-            return false;
+        for (std::size_t offset = 0; offset + sizeof(register_value_t) <= size;) {
+            auto *entry = reinterpret_cast<register_value_t *>(data + offset);
+            const std::size_t entry_size = sizeof(register_value_t) + entry->value_size;
+            if (offset + entry_size > size) {
+                return;
+            }
+            if (entry->register_id == ARM_REG_PC && entry->value_size == sizeof(std::uint32_t) &&
+                (entry->flags & REGISTER_VALUE_FLAG_UNAVAILABLE) == 0) {
+                const std::uint32_t pc = static_cast<std::uint32_t>(sw_step_over_address);
+                std::memcpy(data + offset + sizeof(register_value_t), &pc, sizeof(pc));
+                return;
+            }
+            offset += entry_size;
         }
-        std::memcpy(&pc, out.data() + sizeof(register_value_t), sizeof(pc));
-        return true;
+    }
+
+    void sidp_session::update_step_over_after_register_write(const std::uint8_t *data, std::size_t size,
+                                                              std::uint16_t register_count) noexcept
+    {
+        if (!sw_step_over_pending) {
+            return;
+        }
+        std::size_t offset = 0;
+        for (std::uint16_t index = 0; index < register_count; ++index) {
+            if (offset + sizeof(register_value_t) > size) {
+                return;
+            }
+            const auto *entry = reinterpret_cast<const register_value_t *>(data + offset);
+            const std::size_t entry_size = sizeof(register_value_t) + entry->value_size;
+            if (offset + entry_size > size) {
+                return;
+            }
+            if (entry->register_id == ARM_REG_PC && entry->value_size == sizeof(std::uint32_t)) {
+                std::uint32_t pc = 0;
+                std::memcpy(&pc, data + offset + sizeof(register_value_t), sizeof(pc));
+                if (pc != sw_step_over_address) {
+                    sw_step_over_pending = false;
+                    sw_step_over_address = 0;
+                }
+                return;
+            }
+            offset += entry_size;
+        }
     }
 
     sidp_session::step_over_t sidp_session::execute_step_over(run_action_t action, stop_detect_t &step_stop) noexcept
     {
         step_stop = stop_detect_t{};
 
-        std::uint32_t pc = 0;
-        if (!read_current_pc(pc)) {
-            return step_over_t::FAILED;
-        }
-        const sw_bp_t *bp = sw_bp_find_by_address(pc);
-        if (bp == nullptr) {
+        if (!sw_step_over_pending) {
             return step_over_t::NOT_NEEDED;
         }
 
-        constexpr std::uint8_t BKPT_PATCH[2] = {0x00, 0xBE};
-        const auto repatch = [&]() {
-            return backend.write_mem(bp->address, BKPT_PATCH, sizeof(BKPT_PATCH), MEM_WIDTH_DEFAULT) == ESP_OK;
-        };
-
-        // Restore the complete original instruction, step it, then re-patch.
-        if (backend.write_mem(bp->address, bp->original, bp->instruction_size, MEM_WIDTH_DEFAULT) != ESP_OK) {
+        const std::uint32_t pc = static_cast<std::uint32_t>(sw_step_over_address);
+        sw_bp_t *bp = sw_bp_find_by_address(sw_step_over_address);
+        if (bp != nullptr && !sw_bp_restore_one(*bp)) {
+            return step_over_t::FAILED;
+        }
+        if (!write_current_pc(pc)) {
+            if (bp != nullptr) {
+                (void)sw_bp_install_one(*bp);
+            }
             return step_over_t::FAILED;
         }
         if (backend.resume(RUN_SINGLE_STEP, 0) != ESP_OK) {
-            (void)repatch();
+            if (bp != nullptr) {
+                (void)sw_bp_install_one(*bp);
+            }
             return step_over_t::FAILED;
         }
 
@@ -1251,15 +1302,19 @@ namespace sidp
         }
         if (!halted) {
             // Target state unknown after an unconsummated step: terminal (§10.4).
-            (void)repatch();
+            if (bp != nullptr) {
+                (void)sw_bp_install_one(*bp);
+            }
             return step_over_t::FAILED_LOST;
         }
 
         // Keep the breakpoint armed for the resumed run; a failed re-patch
         // must not silently disarm the breakpoint.
-        if (!repatch()) {
+        if (bp != nullptr && !sw_bp_install_one(*bp)) {
             return step_over_t::FAILED;
         }
+        sw_step_over_pending = false;
+        sw_step_over_address = 0;
 
         // A clean step only sets the step/halt/external bits; anything else
         // (fault, vector catch, watchpoint, another breakpoint) must surface.
@@ -1327,18 +1382,26 @@ namespace sidp
         }
 
         // Stage 2: write the halfword BKPT patches.
-        constexpr std::uint8_t BKPT_PATCH[2] = {0x00, 0xBE}; // little-endian 0xBE00
         for (std::size_t index = 0; index < sw_count; ++index) {
             sw_bp_t &slot = sw_table[index];
-            if (backend.write_mem(slot.address, BKPT_PATCH, sizeof(BKPT_PATCH), MEM_WIDTH_DEFAULT) != ESP_OK) {
+            if (!sw_bp_install_one(slot)) {
                 ESP_LOGE(TAG, "sw_bp_apply: sw bp patch write failed @0x%llx",
                          static_cast<unsigned long long>(slot.address));
                 (void)sw_bp_restore_all();
                 return false;
             }
-            slot.installed = true;
         }
         ESP_LOGD(TAG, "sw_bp_apply: sw breakpoints armed: %u", static_cast<unsigned>(sw_count));
+        return true;
+    }
+
+    bool sidp_session::sw_bp_install_one(sw_bp_t &entry) noexcept
+    {
+        constexpr std::uint8_t BKPT_PATCH[2] = {0x00, 0xBE};
+        if (backend.write_mem(entry.address, BKPT_PATCH, sizeof(BKPT_PATCH), MEM_WIDTH_DEFAULT) != ESP_OK) {
+            return false;
+        }
+        entry.installed = true;
         return true;
     }
 
@@ -1418,7 +1481,7 @@ namespace sidp
         }
     }
 
-    const sidp_session::sw_bp_t *sidp_session::sw_bp_find_by_address(std::uint64_t address) const noexcept
+    sidp_session::sw_bp_t *sidp_session::sw_bp_find_by_address(std::uint64_t address) noexcept
     {
         for (std::size_t index = 0; index < sw_count; ++index) {
             if (sw_table[index].address == address) {
@@ -1426,6 +1489,18 @@ namespace sidp
             }
         }
         return nullptr;
+    }
+
+    sidp_session::sw_bp_t *sidp_session::sw_bp_find_by_halt_pc(std::uint64_t pc) noexcept
+    {
+        if (pc >= 2) {
+            sw_bp_t *entry = sw_bp_find_by_address(pc - 2);
+            if (entry != nullptr && entry->installed) {
+                return entry;
+            }
+        }
+        sw_bp_t *entry = sw_bp_find_by_address(pc);
+        return entry != nullptr && entry->installed ? entry : nullptr;
     }
 
     bool sidp_session::rollback_run_config() noexcept
@@ -1548,6 +1623,8 @@ namespace sidp
         pending_registers_size = 0;
         pending_stack_size = 0;
         pending_stack_address = 0;
+        sw_step_over_pending = false;
+        sw_step_over_address = 0;
     }
 
     void sidp_session::clear_run_tracking() noexcept

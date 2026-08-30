@@ -223,9 +223,24 @@ public:
         return ESP_OK;
     }
 
-    esp_err_t write_regs(const std::uint8_t *, std::size_t) override
+    esp_err_t write_regs(const std::uint8_t *data, std::size_t size) override
     {
-        return fault_next() ? ESP_FAIL : ESP_OK;
+        if (fault_next()) {
+            return ESP_FAIL;
+        }
+        for (std::size_t offset = 0; offset + sizeof(register_value_t) <= size;) {
+            const auto *entry = reinterpret_cast<const register_value_t *>(data + offset);
+            const std::size_t entry_size = sizeof(register_value_t) + entry->value_size;
+            if (offset + entry_size > size) {
+                return ESP_ERR_INVALID_ARG;
+            }
+            if (entry->register_id == ARM_REG_PC && entry->value_size == sizeof(last_pc)) {
+                std::memcpy(&last_pc, data + offset + sizeof(register_value_t), sizeof(last_pc));
+                step_pc = last_pc;
+            }
+            offset += entry_size;
+        }
+        return ESP_OK;
     }
 
     esp_err_t read_mem(std::uint64_t address, std::uint8_t *out, std::size_t size,
@@ -754,10 +769,12 @@ int main()
         session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
         tx_frames.clear();
 
-        // Target hits the software breakpoint: PC normalized to the bp address.
+        // Cortex-M reports PC after the 16-bit BKPT instruction.
         target.halted = true;
-        backend.last_pc = mock_target_t::RAM_BASE + 0x200;
-        backend.last_comparator_match = true;
+        target.running = false;
+        backend.last_pc = mock_target_t::RAM_BASE + 0x202;
+        backend.last_comparator_match = false;
+        backend.last_dfsr = 0x2;
         session.handle_poll();
 
         CHECK(tx_frames.size() == 1);
@@ -765,6 +782,40 @@ int main()
         auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
         CHECK(stopped->reason == STOP_BREAKPOINT);
         CHECK(stopped->breakpoint_id == 7);
+        bool stopped_pc_found = false;
+        std::size_t register_offset = sizeof(stopped_event_t);
+        for (std::uint16_t index = 0; index < stopped->register_count; ++index) {
+            const auto *entry = reinterpret_cast<const register_value_t *>(view.payload + register_offset);
+            if (entry->register_id == ARM_REG_PC) {
+                std::uint32_t pc = 0;
+                std::memcpy(&pc, view.payload + register_offset + sizeof(register_value_t), sizeof(pc));
+                CHECK(pc == bp->address);
+                stopped_pc_found = true;
+            }
+            register_offset += sizeof(register_value_t) + entry->value_size;
+        }
+        CHECK(stopped_pc_found);
+
+        tx_frames.clear();
+        std::uint8_t read_payload[sizeof(read_registers_request_t) + sizeof(register_id_t)]{};
+        auto *read_req = reinterpret_cast<read_registers_request_t *>(read_payload);
+        read_req->stop_id = 2;
+        read_req->register_count = 1;
+        const register_id_t pc_id = ARM_REG_PC;
+        std::memcpy(read_payload + sizeof(read_registers_request_t), &pc_id, sizeof(pc_id));
+        session.handle_request(make_request(OP_READ_REGISTERS, 3, read_payload, sizeof(read_payload)));
+        CHECK(tx_frames.size() == 1);
+        const auto read_view = parse_frame(0);
+        const auto *read_resp = reinterpret_cast<const read_registers_response_t *>(read_view.payload);
+        const auto *pc_entry = reinterpret_cast<const register_value_t *>(
+            read_view.payload + sizeof(read_registers_response_t));
+        std::uint32_t read_pc = 0;
+        std::memcpy(&read_pc,
+                    read_view.payload + sizeof(read_registers_response_t) + sizeof(register_value_t),
+                    sizeof(read_pc));
+        CHECK(read_resp->status == STATUS_OK);
+        CHECK(pc_entry->register_id == ARM_REG_PC);
+        CHECK(read_pc == bp->address);
     }
 
     // ---- Test 12: WRITE_MEMORY overlapping a patch updates the shadow ----
@@ -960,7 +1011,6 @@ int main()
         session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
         tx_frames.clear();
 
-        // Halted with PC sitting on the installed software breakpoint.
         const std::uint64_t bp_addr = mock_target_t::RAM_BASE + 0x400;
         std::array<std::uint8_t, sizeof(run_request_t) + sizeof(breakpoint_t)> run_payload{};
         auto *run = reinterpret_cast<run_request_t *>(run_payload.data());
@@ -974,11 +1024,21 @@ int main()
         bp->instruction_size = 4;
         bp->enabled = 1;
 
-        // The stop PC equals the breakpoint address.
-        backend.last_pc = static_cast<std::uint32_t>(bp_addr);
-        backend.step_pc = static_cast<std::uint32_t>(bp_addr);
-        backend.step_clean = true;
         session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
+        CHECK(response_status(0) == STATUS_OK);
+
+        target.halted = true;
+        target.running = false;
+        backend.last_pc = static_cast<std::uint32_t>(bp_addr + 2);
+        backend.last_dfsr = 0x2;
+        backend.last_comparator_match = false;
+        session.handle_poll();
+        CHECK(session.get_stop_id() == 2);
+
+        tx_frames.clear();
+        run->stop_id = 2;
+        backend.step_clean = true;
+        session.handle_request(make_request(OP_RUN, 3, run_payload.data(), run_payload.size()));
         // RUN response OK, target RUNNING, no STOPPED (continue went through).
         CHECK(tx_frames.size() == 1);
         CHECK(response_status(0) == STATUS_OK);
@@ -1020,11 +1080,23 @@ int main()
         bp->instruction_size = 2;
         bp->enabled = 1;
 
-        backend.last_pc = static_cast<std::uint32_t>(bp_addr);
-        backend.step_pc = static_cast<std::uint32_t>(bp_addr);
+        run->action = RUN_CONTINUE;
+        session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
+        CHECK(response_status(0) == STATUS_OK);
+
+        target.halted = true;
+        target.running = false;
+        backend.last_pc = static_cast<std::uint32_t>(bp_addr + 2);
+        backend.last_dfsr = 0x2;
+        backend.last_comparator_match = false;
+        session.handle_poll();
+        CHECK(session.get_stop_id() == 2);
+
+        tx_frames.clear();
+        run->stop_id = 2;
         backend.step_clean = false;      // the stepped instruction faults
         backend.step_fault_dfsr = 0x8;   // VCATCH
-        session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
+        session.handle_request(make_request(OP_RUN, 3, run_payload.data(), run_payload.size()));
 
         // RUN response first, then the real STOPPED (vector catch).
         CHECK(tx_frames.size() == 2);
@@ -1068,10 +1140,23 @@ int main()
         bp->instruction_size = 2;
         bp->enabled = 1;
 
-        backend.last_pc = static_cast<std::uint32_t>(bp_addr);
-        backend.step_pc = static_cast<std::uint32_t>(bp_addr);
-        backend.step_clean = true;
+        run->action = RUN_CONTINUE;
         session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
+        CHECK(response_status(0) == STATUS_OK);
+
+        target.halted = true;
+        target.running = false;
+        backend.last_pc = static_cast<std::uint32_t>(bp_addr + 2);
+        backend.last_dfsr = 0x2;
+        backend.last_comparator_match = false;
+        session.handle_poll();
+        CHECK(session.get_stop_id() == 2);
+
+        tx_frames.clear();
+        run->stop_id = 2;
+        run->action = RUN_SINGLE_STEP;
+        backend.step_clean = true;
+        session.handle_request(make_request(OP_RUN, 3, run_payload.data(), run_payload.size()));
 
         CHECK(tx_frames.size() == 2);
         CHECK(response_status(0) == STATUS_OK);
@@ -1145,10 +1230,34 @@ int main()
         bp->instruction_size = 2;
         bp->enabled = 1;
 
-        // Stop PC is NOT on the breakpoint: plain resume, no internal step.
-        backend.last_pc = 0x08000100;
-        backend.step_pc = 0x08000100;
         session.handle_request(make_request(OP_RUN, 2, run_payload.data(), run_payload.size()));
+        CHECK(response_status(0) == STATUS_OK);
+
+        target.halted = true;
+        target.running = false;
+        backend.last_pc = static_cast<std::uint32_t>(bp_addr + 2);
+        backend.last_dfsr = 0x2;
+        backend.last_comparator_match = false;
+        session.handle_poll();
+        CHECK(session.get_stop_id() == 2);
+
+        std::uint8_t write_payload[sizeof(write_registers_request_t) + sizeof(register_value_t) + sizeof(std::uint32_t)]{};
+        auto *write_req = reinterpret_cast<write_registers_request_t *>(write_payload);
+        write_req->stop_id = 2;
+        write_req->register_count = 1;
+        auto *pc_entry = reinterpret_cast<register_value_t *>(write_payload + sizeof(write_registers_request_t));
+        pc_entry->register_id = ARM_REG_PC;
+        pc_entry->value_size = sizeof(std::uint32_t);
+        const std::uint32_t moved_pc = 0x08000100;
+        std::memcpy(write_payload + sizeof(write_registers_request_t) + sizeof(register_value_t),
+                    &moved_pc, sizeof(moved_pc));
+        tx_frames.clear();
+        session.handle_request(make_request(OP_WRITE_REGISTERS, 3, write_payload, sizeof(write_payload)));
+        CHECK(response_status(0) == STATUS_OK);
+
+        tx_frames.clear();
+        run->stop_id = 2;
+        session.handle_request(make_request(OP_RUN, 4, run_payload.data(), run_payload.size()));
         CHECK(tx_frames.size() == 1);
         CHECK(response_status(0) == STATUS_OK);
         CHECK(session.get_state() == TARGET_RUNNING);
