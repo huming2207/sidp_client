@@ -92,3 +92,62 @@ scheduling and lock acquisition also contribute to actual elapsed time. Any
 failed transmission ends the session because a partially delivered frame cannot
 be treated as an intact message. `flush_write()` reports failure after that loss,
 not successful delivery just because the queue became empty.
+
+## Backend contract
+
+The session enforces the attach response on the wire and never advertises a
+capability or resource limit it cannot serve:
+
+- `CAP_MEMORY_VECTOR`, the UART/RTT log-stream bits and the reserved ESP32
+  GDB-Stub bits have no session handler and are stripped from the response.
+- `hardware_breakpoints`/`hardware_watchpoints` are clamped to the session's own
+  comparator tables, and a feature bit left with zero slots is dropped.
+- `CAP_RESET_HALT`/`CAP_RESET_RUN` without `CAP_RESET_SYSTEM` or
+  `CAP_RESET_NRST` are dropped.
+- `max_memory_transfer == 0` becomes the protocol default 4096, and anything
+  larger than one SIDP frame can carry is clamped.
+
+After that, `RUN` rejects a request that needs an absent feature: a software or
+hardware breakpoint without its capability, or a watchpoint without
+`CAP_WATCHPOINT`, returns `NO_BREAKPOINT_SLOT`/`NO_WATCHPOINT_SLOT` (protocol
+section 10 treats "no capability or no slots" as the same condition), and
+hardware breakpoint/watchpoint counts are bounded by the advertised slot count.
+`RUN_SINGLE_STEP` without `CAP_SINGLE_STEP` returns `UNSUPPORTED` because that
+action cannot be represented at all. `RUN_TO_ADDRESS` returns
+`NO_BREAKPOINT_SLOT` whenever there is no reusable or free hardware comparator,
+including a backend with zero hardware-breakpoint slots (protocol section 10.1
+treats this as "no available slot"). Memory reads/writes are bounded by
+`max_memory_transfer`, which is a limit on wire requests only; internal
+snapshot, stack and software-breakpoint transfers may exceed it. Internally,
+the stack snapshot is taken only from a RAM region whose flags include
+`MEM_READ`, and software breakpoints require RAM that is readable, writable and
+executable (the original instruction is read back and substituted).
+
+The backend must implement the invariants documented in
+`include/sidp_backend.hpp`; that header is the authoritative contract, including
+per-operation error handling, validation ownership, software-breakpoint
+single-step and `RUN_TO_ADDRESS` comparator requirements, and retryable cleanup.
+The session relies on those and cannot compensate for a backend that reports
+resources it will not serve.
+
+## Resource discipline (ESP32)
+
+This is firmware: heap use is deliberately minimal and no allocation happens on
+the per-request path.
+
+- `sidp_session::init()` allocates its four PSRAM buffers once and
+  `release_storage()` (destructor) frees them with the matching
+  `heap_caps_free`. After `init()`, handling requests performs no allocation.
+- The queue mutex uses `StaticSemaphore_t` storage created in `create_queues()`
+  instead of `std::mutex`, because ESP-IDF's `std::mutex` lazily `malloc`s a
+  pthread control block on first lock. `packet_queue_transport::queue_guard`
+  takes/gives that static semaphore.
+- Transport queues, staging buffers and TX tasks are allocated once in the
+  transport `init()` and live for the process lifetime, by design.
+- STL use is limited to non-allocating facilities (`std::span`, `std::array`,
+  `std::atomic`, `<cstdint>`/`<cstddef>`, `std::numeric_limits`, `std::endian`);
+  no runtime containers, strings, `std::function` or exceptions are used.
+- Known library exceptions outside component control: `esp_websocket_client`
+  allocates internally per event/message, and `reconnect()` restarts its task.
+  Those are connection-level, not per-request, and the caller must budget for
+  them (or use the CDC transport, which does not).

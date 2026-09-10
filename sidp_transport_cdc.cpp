@@ -10,7 +10,7 @@ namespace sidp
 
     esp_err_t cdc_slip_transport::init(tinyusb_cdcacm_itf_t port) noexcept
     {
-        if (initialized) {
+        if (initialized.load()) {
             ESP_LOGE(TAG, "init: cdc transport already initialized");
             return ESP_ERR_INVALID_STATE;
         }
@@ -37,7 +37,7 @@ namespace sidp
         cdc_port = port;
         frame_buffer = buffers;
         tx_buffer = buffers + MAX_FRAME_SIZE;
-        initialized = true;
+        initialized.store(true);
 
         const tinyusb_config_cdcacm_t cdc_config = {
             .cdc_port = cdc_port,
@@ -49,7 +49,7 @@ namespace sidp
         const esp_err_t result = tinyusb_cdcacm_init(&cdc_config);
         if (result != ESP_OK) {
             ESP_LOGE(TAG, "init: tinyusb_cdcacm_init failed: %s", esp_err_to_name(result));
-            initialized = false;
+            initialized.store(false);
             cdc_port = TINYUSB_CDC_ACM_0;
             frame_buffer = nullptr;
             tx_buffer = nullptr;
@@ -63,7 +63,7 @@ namespace sidp
             ESP_LOGE(TAG, "init: tx task spawn failed");
             tinyusb_cdcacm_unregister_callback(cdc_port, CDC_EVENT_RX);
             tinyusb_cdcacm_unregister_callback(cdc_port, CDC_EVENT_LINE_STATE_CHANGED);
-            initialized = false;
+            initialized.store(false);
             cdc_port = TINYUSB_CDC_ACM_0;
             frame_buffer = nullptr;
             tx_buffer = nullptr;
@@ -133,7 +133,7 @@ namespace sidp
 
     bool cdc_slip_transport::physical_link_open() const noexcept
     {
-        return initialized && tinyusb_cdcacm_initialized(cdc_port) &&
+        return initialized.load() && tinyusb_cdcacm_initialized(cdc_port) &&
                tud_cdc_n_connected(static_cast<std::uint8_t>(cdc_port));
     }
 
@@ -148,6 +148,9 @@ namespace sidp
         (void)arg;
         if (event == nullptr) return;
         auto &transport = instance();
+        // The application may forward a composite-driver device event before
+        // init() has created the queues; ignore it until the transport is up.
+        if (!transport.initialized.load()) return;
         if (event->id == TINYUSB_EVENT_ATTACHED || event->id == TINYUSB_EVENT_DETACHED) {
             transport.dtr = false;
             transport.link_changed(false); // Wait for a new DTR assertion.
@@ -160,7 +163,7 @@ namespace sidp
     {
         if (event == nullptr) return;
         auto &transport = instance();
-        if (!transport.initialized || static_cast<int>(transport.cdc_port) != itf) return;
+        if (!transport.initialized.load() || static_cast<int>(transport.cdc_port) != itf) return;
         if (event->type == CDC_EVENT_LINE_STATE_CHANGED) {
             const bool dtr = event->line_state_changed_data.dtr;
             if (transport.dtr != dtr) {

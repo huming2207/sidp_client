@@ -227,6 +227,7 @@ STOPPED
 - session已实现基础控制、内存/寄存器访问、快照、软件断点shadow和step-over；这些是host模型覆盖，不是硬件验证。
 - 本组件只有 `sidp::target_backend_t` 接口，没有真实SWD实现。主工程的 `swd_cortexm_backend` 是烧录接口的实现，不能直接作为SIDP backend使用；主工程main目前也没有SIDP调用点。
 - `READ_MEMORY_VECTOR`、日志配置和ESP32 GDB Stub目前没有session handler，不得声明对应能力。
+- session现在会在attach时剥离未实现的capability、把断点/watchpoint slot数限制在自身表容量内、去掉没有slot或reset方法的feature bit，并把 `max_memory_transfer` 限制在单帧可承载范围；RUN和内存访问随后按这些宣告值拒绝超限请求。backend必须如实上报，细节见 [组件集成](integration.md#backend-contract)。
 - WebSocket实现是主动连接的client，不等于已经有局域网WSS server、配对流程或Soul Interconnect。
 
 ### 下一步：USB + 一块M4 + 最小控制闭环

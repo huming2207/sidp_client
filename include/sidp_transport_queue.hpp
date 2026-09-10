@@ -3,11 +3,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <span>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sidp_transport.hpp"
 
@@ -89,7 +89,41 @@ namespace sidp
         static void tx_task_trampoline(void *arg) noexcept;
         void tx_task_loop() noexcept;
 
-        std::mutex queue_mutex;
+        /**
+         * @brief RAII guard over the statically allocated queue mutex.
+         *
+         * The mutex uses caller-provided storage (StaticSemaphore_t) so it never
+         * allocates on the heap; on ESP-IDF a std::mutex would lazily malloc its
+         * pthread control block on first lock. The handle is null before
+         * create_queues() runs, in which case there is no shared state to protect
+         * yet and the guard is a no-op.
+         */
+        class queue_guard final
+        {
+        public:
+            explicit queue_guard(SemaphoreHandle_t handle) noexcept : mutex(handle)
+            {
+                if (mutex != nullptr) {
+                    (void)xSemaphoreTake(mutex, portMAX_DELAY);
+                }
+            }
+
+            ~queue_guard() noexcept
+            {
+                if (mutex != nullptr) {
+                    (void)xSemaphoreGive(mutex);
+                }
+            }
+
+            queue_guard(const queue_guard &) = delete;
+            queue_guard &operator=(const queue_guard &) = delete;
+
+        private:
+            SemaphoreHandle_t mutex;
+        };
+
+        SemaphoreHandle_t queue_mutex = nullptr;
+        StaticSemaphore_t queue_mutex_storage{};
         RingbufHandle_t ring_buffer = nullptr;
         RingbufHandle_t tx_ring = nullptr;
         RingbufHandle_t log_ring = nullptr;

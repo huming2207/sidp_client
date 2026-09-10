@@ -159,6 +159,12 @@ int main() {
 
     // CDC DTR and physical-device boundaries both require fresh acceptance.
     auto &cdc = cdc_slip_transport::instance();
+    // A device event forwarded before init() must be ignored: it must not touch
+    // the queue mutex or ring pointers while they are being created.
+    tinyusb_event_t early_event{TINYUSB_EVENT_ATTACHED};
+    cdc_slip_transport::device_event_callback(&early_event, nullptr);
+    assert(!cdc.link_is_connected());
+    assert(cdc.needs_disconnect());
     assert(cdc.init(TINYUSB_CDC_ACM_0) == ESP_OK);
     tinyusb_event_t attached{TINYUSB_EVENT_ATTACHED};
     cdc_slip_transport::device_event_callback(&attached, nullptr);

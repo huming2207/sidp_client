@@ -41,13 +41,13 @@ namespace sidp
 
     void packet_queue_transport::close_session() noexcept
     {
-        const std::lock_guard lock(queue_mutex);
+        const queue_guard lock(queue_mutex);
         close_locked();
     }
 
     void packet_queue_transport::link_changed(bool up) noexcept
     {
-        const std::lock_guard lock(queue_mutex);
+        const queue_guard lock(queue_mutex);
         connected.store(up);
         if (up) ++link_serial;
         close_locked();
@@ -55,7 +55,7 @@ namespace sidp
 
     esp_err_t packet_queue_transport::begin_session() noexcept
     {
-        const std::lock_guard lock(queue_mutex);
+        const queue_guard lock(queue_mutex);
         if (ring_buffer == nullptr || !dead.load() || !link_is_connected() ||
             link_serial == accepted_link_serial || tx_busy || rx_borrowed != 0) {
             return ESP_ERR_INVALID_STATE;
@@ -76,7 +76,7 @@ namespace sidp
         const TickType_t limit = timeout_to_ticks(timeout_ms);
         for (;;) {
             {
-                const std::lock_guard lock(queue_mutex);
+                const queue_guard lock(queue_mutex);
                 if (!is_open() || ring_buffer == nullptr) return ESP_ERR_INVALID_STATE;
                 auto *packet = static_cast<std::uint8_t *>(xRingbufferReceive(ring_buffer, len_out, 0));
                 if (packet != nullptr) {
@@ -94,7 +94,7 @@ namespace sidp
 
     void packet_queue_transport::end_read(std::uint8_t *buf_return) noexcept
     {
-        const std::lock_guard lock(queue_mutex);
+        const queue_guard lock(queue_mutex);
         if (buf_return != nullptr && ring_buffer != nullptr) {
             vRingbufferReturnItem(ring_buffer, buf_return);
             --rx_borrowed;
@@ -103,6 +103,14 @@ namespace sidp
 
     esp_err_t packet_queue_transport::create_queues() noexcept
     {
+        // The queue mutex uses caller-provided storage, so it never allocates.
+        // It must exist before any queue or callback can be published.
+        if (queue_mutex == nullptr) {
+            queue_mutex = xSemaphoreCreateMutexStatic(&queue_mutex_storage);
+            if (queue_mutex == nullptr) {
+                return ESP_ERR_NO_MEM;
+            }
+        }
         ring_buffer = xRingbufferCreateWithCaps(QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
         tx_ring = xRingbufferCreateWithCaps(QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
         log_ring = xRingbufferCreateWithCaps(LOG_QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
@@ -115,17 +123,20 @@ namespace sidp
 
     void packet_queue_transport::destroy_queues() noexcept
     {
-        for (auto *ring : {&ring_buffer, &tx_ring, &log_ring}) {
+        RingbufHandle_t *rings[3] = {&ring_buffer, &tx_ring, &log_ring};
+        for (RingbufHandle_t *ring : rings) {
             if (*ring != nullptr) vRingbufferDeleteWithCaps(*ring);
             *ring = nullptr;
         }
+        // The static mutex storage stays owned by this object; it is never
+        // heap-allocated, so there is nothing to release here.
     }
 
     void packet_queue_transport::deliver_packet(const std::uint8_t *data, std::size_t size, std::uint32_t received_epoch) noexcept
     {
         const std::span<const std::uint8_t> packet(data, size);
         if (!is_valid_message_size(size) || !crc32_hasher::verify_message_crc(packet)) return;
-        const std::lock_guard lock(queue_mutex);
+        const queue_guard lock(queue_mutex);
         if (!is_open() || received_epoch != epoch.load()) return;
         if (data[0] != PROTOCOL_VERSION || xRingbufferSend(ring_buffer, data, size, 0) != pdTRUE) {
             // Losing a request or receiving an unknown layout ends this session.
@@ -147,7 +158,7 @@ namespace sidp
         if (log && reinterpret_cast<const msg_header_t *>(message.data())->kind != KIND_LOG_STREAM) {
             return ESP_ERR_INVALID_ARG;
         }
-        const std::lock_guard lock(queue_mutex);
+        const queue_guard lock(queue_mutex);
         if (!is_open() || tx_ring == nullptr) return ESP_ERR_INVALID_STATE;
         if (xRingbufferSend(log ? log_ring : tx_ring, message.data(), message.size(), 0) != pdTRUE) {
             tx_dropped.fetch_add(1);
@@ -175,7 +186,7 @@ namespace sidp
         const TickType_t limit = timeout_to_ticks(timeout_ms);
         for (;;) {
             {
-                const std::lock_guard lock(queue_mutex);
+                const queue_guard lock(queue_mutex);
                 if (!is_open()) return ESP_ERR_INVALID_STATE;
                 if (tx_pending == 0 && !tx_busy) return ESP_OK;
             }
@@ -193,7 +204,7 @@ namespace sidp
 
     bool packet_queue_transport::tx_idle() noexcept
     {
-        const std::lock_guard lock(queue_mutex);
+        const queue_guard lock(queue_mutex);
         return !tx_busy;
     }
 
@@ -204,7 +215,7 @@ namespace sidp
         RingbufHandle_t source = nullptr;
         bool log = false;
         {
-            const std::lock_guard lock(queue_mutex);
+            const queue_guard lock(queue_mutex);
             if (!is_open() || tx_busy) return false;
             source = tx_ring;
             item = static_cast<std::uint8_t *>(xRingbufferReceive(source, &size, 0));
@@ -220,7 +231,7 @@ namespace sidp
         // A new session cannot begin while this frame is in flight.
         const bool sent = deliver_tx_frame({item, size}, log);
         {
-            const std::lock_guard lock(queue_mutex);
+            const queue_guard lock(queue_mutex);
             vRingbufferReturnItem(source, item);
             if (!sent) {
                 tx_dropped.fetch_add(1);

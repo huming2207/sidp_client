@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <utility>
 #include <vector>
 
@@ -36,10 +37,23 @@ struct mock_target_t {
     int writes_while_running = 0;
     int write_regs_calls = 0;
 
+    // Attach advertisement: tests shrink capabilities or resource counts.
+    std::uint32_t caps_extra = 0;   // ORed into the discovered capability set
+    std::uint32_t caps_remove = 0;  // removed from the discovered capability set
+    std::uint16_t hw_bp_override = 6;
+    std::uint16_t hw_wp_override = 4;
+    std::uint16_t max_xfer_override = 4096;
+    // Memory-map scripting for boundary tests.
+    std::uint64_t region_base = RAM_BASE;
+    memory_flag_t ram_flags = static_cast<memory_flag_t>(MEM_READ | MEM_WRITE | MEM_EXECUTE);
+    std::uint32_t snapshot_sp = 0x20008000;
+
     // Observability
     int halt_calls = 0;
     int resume_calls = 0;
     int reset_calls = 0;
+    int read_mem_calls = 0;
+    int write_mem_calls = 0;
     std::vector<std::uint32_t> applied_hw_bp_addresses;
     std::vector<std::uint64_t> applied_wp_addresses;
     std::uint32_t last_vector_catch = 0;
@@ -52,8 +66,8 @@ struct mock_target_t {
 
     std::uint8_t *mem_at(std::uint64_t address)
     {
-        if (address >= RAM_BASE && address - RAM_BASE + 0 <= RAM_SIZE - 4) {
-            return mem.data() + (address - RAM_BASE);
+        if (address >= region_base && address - region_base + 0 <= RAM_SIZE - 4) {
+            return mem.data() + (address - region_base);
         }
         return nullptr;
     }
@@ -72,20 +86,24 @@ public:
         info.architecture = ARCH_ARM_M;
         info.profile = PROFILE_ARMV7EM;
         info.address_width = 32;
-        info.capabilities = static_cast<capability_t>(CAP_HARDWARE_BP | CAP_SOFTWARE_BP | CAP_WATCHPOINT |
-                                                      CAP_SINGLE_STEP | CAP_RESET_HALT | CAP_RESET_SYSTEM |
-                                                      CAP_RESET_RUN | CAP_STOP_SNAPSHOT);
+        info.capabilities = static_cast<capability_t>(
+            (static_cast<std::uint32_t>(CAP_HARDWARE_BP | CAP_SOFTWARE_BP | CAP_WATCHPOINT |
+                                        CAP_SINGLE_STEP | CAP_RESET_HALT | CAP_RESET_SYSTEM |
+                                        CAP_RESET_RUN | CAP_STOP_SNAPSHOT) |
+             target_.caps_extra) &
+            ~target_.caps_remove);
         info.target_id = 0x12345678;
         info.cpu_id = 0x411FC241; // Cortex-M4 r0p1
         info.supported_vector_catch_mask = static_cast<vector_catch_t>(VECTOR_CATCH_RESET | VECTOR_CATCH_HARD_FAULT);
-        info.hardware_breakpoints = 6;
-        info.hardware_watchpoints = 4;
-        info.max_memory_transfer = 4096;
-        static const std::array<memory_region_t, 1> regions{{
-            memory_region_t{mock_target_t::RAM_BASE, mock_target_t::RAM_SIZE, MEMORY_RAM,
-                            static_cast<memory_flag_t>(MEM_READ | MEM_WRITE | MEM_EXECUTE), {0, 0}},
-        }};
-        info.memory_regions = {reinterpret_cast<const std::uint8_t *>(regions.data()), regions.size() * sizeof(memory_region_t)};
+        info.hardware_breakpoints = target_.hw_bp_override;
+        info.hardware_watchpoints = target_.hw_wp_override;
+        info.max_memory_transfer = target_.max_xfer_override;
+        // Keep the region storage alive past attach(): the session copies the
+        // span after this call returns.
+        region_storage[0] = memory_region_t{target_.region_base, mock_target_t::RAM_SIZE, MEMORY_RAM,
+                                            target_.ram_flags, {0, 0}};
+        info.memory_regions = {reinterpret_cast<const std::uint8_t *>(region_storage.data()),
+                               region_storage.size() * sizeof(memory_region_t)};
         return ESP_OK;
     }
 
@@ -227,12 +245,18 @@ public:
             auto *entry = reinterpret_cast<register_value_t *>(out_blob.data() + index * entry_size);
             entry->register_id = index == 0 ? ARM_REG_PC : ARM_REG_SP;
             entry->value_size = 4;
-            entry->flags = REGISTER_VALUE_FLAG_NONE;
-            const std::uint32_t value = index == 0 ? 0x1000 : 0x20008000;
+            // Scripted UNAVAILABLE SP: the session must not use the placeholder
+            // bytes as a stack address.
+            entry->flags = (index == 1 && snapshot_sp_unavailable) ? REGISTER_VALUE_FLAG_UNAVAILABLE
+                                                                   : REGISTER_VALUE_FLAG_NONE;
+            const std::uint32_t value = index == 0 ? 0x1000 : target_.snapshot_sp;
             std::memcpy(reinterpret_cast<std::uint8_t *>(entry) + sizeof(register_value_t), &value, sizeof(value));
         }
         return ESP_OK;
     }
+
+    /** @brief When set, the snapshot reports SP with the UNAVAILABLE flag. */
+    bool snapshot_sp_unavailable = false;
 
     esp_err_t write_regs(const std::uint8_t *data, std::size_t size) override
     {
@@ -258,6 +282,7 @@ public:
     esp_err_t read_mem(std::uint64_t address, std::uint8_t *out, std::size_t size,
                        memory_access_width_t width) override
     {
+        ++target_.read_mem_calls;
         target_.last_read_width = width;
         if (fault_next()) {
             return ESP_FAIL;
@@ -273,6 +298,7 @@ public:
     esp_err_t write_mem(std::uint64_t address, const std::uint8_t *data, std::size_t size,
                         memory_access_width_t width) override
     {
+        ++target_.write_mem_calls;
         target_.last_write_width = width;
         if (target_.running) ++target_.writes_while_running;
         const bool patch = size == 2 && data[0] == 0 && data[1] == 0xBE;
@@ -300,7 +326,6 @@ public:
         }
         return ESP_OK;
     }
-
     esp_err_t apply_watchpoints(std::span<const wp_entry_t> entries) override
     {
         if (fault_next()) {
@@ -331,6 +356,8 @@ public:
 private:
     bool fault_next() { return std::exchange(target_.fault_on_next, false); }
     mock_target_t &target_;
+    /** @brief Region storage kept alive for the session's post-attach copy. */
+    std::array<memory_region_t, 1> region_storage{};
 };
 
 // ----------------------------------------------------------------------------
@@ -431,6 +458,32 @@ static void run_patch(sidp_session &session, run_action_t action = RUN_CONTINUE)
     auto *bp = reinterpret_cast<breakpoint_t *>(payload.data() + sizeof(*run));
     *bp = breakpoint_t{7, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_SOFTWARE, 2, 1, 0};
     session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+}
+
+// Builds a RUN request with an arbitrary breakpoint/watchpoint set.
+static std::vector<std::uint8_t> run_payload(std::uint32_t stop_id, run_action_t action,
+                                             std::initializer_list<breakpoint_t> bps = {},
+                                             std::initializer_list<watchpoint_t> wps = {},
+                                             std::uint64_t run_to_address = 0)
+{
+    std::vector<std::uint8_t> payload(sizeof(run_request_t) + bps.size() * sizeof(breakpoint_t) +
+                                      wps.size() * sizeof(watchpoint_t));
+    auto *run = reinterpret_cast<run_request_t *>(payload.data());
+    run->stop_id = stop_id;
+    run->action = action;
+    run->run_to_address = run_to_address;
+    run->breakpoint_count = static_cast<std::uint16_t>(bps.size());
+    run->watchpoint_count = static_cast<std::uint16_t>(wps.size());
+    std::size_t offset = sizeof(run_request_t);
+    for (const auto &bp : bps) {
+        std::memcpy(payload.data() + offset, &bp, sizeof(bp));
+        offset += sizeof(bp);
+    }
+    for (const auto &wp : wps) {
+        std::memcpy(payload.data() + offset, &wp, sizeof(wp));
+        offset += sizeof(wp);
+    }
+    return payload;
 }
 
 int main()
@@ -1281,6 +1334,31 @@ int main()
         CHECK(stack[575] == 0xFF);
     }
 
+    // ---- Test 20b: an UNAVAILABLE SP entry must not trigger a stack read ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        backend.snapshot_sp_unavailable = true;
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+
+        const int reads_before = target.read_mem_calls;
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        // The STOPPED still carries the register snapshot, but no stack bytes
+        // and no RAM access, because the SP placeholder is not a valid address.
+        CHECK(tx_frames.size() == 2);
+        const auto view = parse_frame(1);
+        const auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
+        CHECK(stopped->register_count == 2);
+        CHECK(stopped->stack_length == 0);
+        CHECK(stopped->stack_address == 0);
+        CHECK(target.read_mem_calls == reads_before);
+    }
+
     // ---- Test 21: PC moved off the breakpoint by WRITE_REGISTERS skips step-over ----
     {
         tx_frames.clear();
@@ -1744,6 +1822,569 @@ int main()
         const auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
         CHECK(stopped->reason == STOP_RUN_TO_ADDRESS);
         CHECK(stopped->breakpoint_id == 0);
+    }
+
+    // ---- Test 36: RUN refuses features the attach response did not advertise ----
+    {
+        // Software breakpoint without CAP_SOFTWARE_BP: rejected before any patch.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.caps_remove = static_cast<std::uint32_t>(CAP_SOFTWARE_BP);
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_CONTINUE,
+                {breakpoint_t{7, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_SOFTWARE, 2, 1, 0}});
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            // Section 10: insufficient capability is NO_BREAKPOINT_SLOT, not UNSUPPORTED.
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_BREAKPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+            CHECK(target.mem[0x100] == 0x00 && target.mem[0x101] == 0x00);
+        }
+
+        // Hardware breakpoint without CAP_HARDWARE_BP.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.caps_remove = static_cast<std::uint32_t>(CAP_HARDWARE_BP);
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_CONTINUE,
+                {breakpoint_t{8, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_HARDWARE, 0, 1, 0}});
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_BREAKPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+            CHECK(target.applied_hw_bp_addresses.empty());
+        }
+
+        // Watchpoint without CAP_WATCHPOINT.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.caps_remove = static_cast<std::uint32_t>(CAP_WATCHPOINT);
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_CONTINUE, {},
+                {watchpoint_t{9, mock_target_t::RAM_BASE + 0x400, WATCH_WRITE, 4, 1, 0}});
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_WATCHPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+            CHECK(target.applied_wp_addresses.empty());
+        }
+
+        // Single step without CAP_SINGLE_STEP is an unsupported action.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.caps_remove = static_cast<std::uint32_t>(CAP_SINGLE_STEP);
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(session.get_stop_id(), RUN_SINGLE_STEP);
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_UNSUPPORTED);
+            CHECK(target.resume_calls == 0);
+        }
+
+        // A backend claiming CAP_SOFTWARE_BP without CAP_SINGLE_STEP cannot
+        // perform the required internal step-over, so the session strips it.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.caps_remove = static_cast<std::uint32_t>(CAP_SINGLE_STEP);
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            const auto *resp = reinterpret_cast<const attach_response_t *>(parse_frame(0).payload);
+            CHECK((static_cast<std::uint32_t>(resp->capabilities) &
+                   static_cast<std::uint32_t>(CAP_SOFTWARE_BP)) == 0);
+            CHECK((static_cast<std::uint32_t>(resp->capabilities) &
+                   static_cast<std::uint32_t>(CAP_HARDWARE_BP)) != 0);
+
+            tx_frames.clear();
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_CONTINUE,
+                {breakpoint_t{7, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_SOFTWARE, 2, 1, 0}});
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_BREAKPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+            CHECK(target.mem[0x100] == 0x00 && target.mem[0x101] == 0x00);
+        }
+    }
+
+    // ---- Test 37: RUN enforces the advertised comparator slot counts ----
+    {
+        // Two hardware breakpoints with only one advertised slot.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.hw_bp_override = 1;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_CONTINUE,
+                {breakpoint_t{1, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_HARDWARE, 0, 1, 0},
+                 breakpoint_t{2, mock_target_t::RAM_BASE + 0x200, BREAKPOINT_HARDWARE, 0, 1, 0}});
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_BREAKPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+            CHECK(target.applied_hw_bp_addresses.empty());
+        }
+
+        // Two watchpoints with only one advertised slot.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.hw_wp_override = 1;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_CONTINUE, {},
+                {watchpoint_t{1, mock_target_t::RAM_BASE + 0x400, WATCH_WRITE, 4, 1, 0},
+                 watchpoint_t{2, mock_target_t::RAM_BASE + 0x500, WATCH_WRITE, 4, 1, 0}});
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_WATCHPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+            CHECK(target.applied_wp_addresses.empty());
+        }
+
+        // An advertised watchpoint count above the session table is clamped so
+        // the peer can never request an index the session cannot store.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.hw_wp_override = 99;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            const auto *resp = reinterpret_cast<const attach_response_t *>(parse_frame(0).payload);
+            CHECK(resp->hardware_watchpoints == MAX_HARDWARE_WATCHPOINTS);
+
+            // Exactly MAX_HARDWARE_WATCHPOINTS watchpoints still fit.
+            std::vector<watchpoint_t> fit;
+            for (std::size_t index = 0; index < MAX_HARDWARE_WATCHPOINTS; ++index) {
+                fit.push_back(watchpoint_t{static_cast<std::uint32_t>(index + 1),
+                                           mock_target_t::RAM_BASE + 0x400 + index * 4, WATCH_WRITE, 4, 1, 0});
+            }
+            tx_frames.clear();
+            auto payload_fit = run_payload(session.get_stop_id(), RUN_CONTINUE, {}, {});
+            {
+                run_request_t *run = reinterpret_cast<run_request_t *>(payload_fit.data());
+                run->watchpoint_count = static_cast<std::uint16_t>(fit.size());
+                payload_fit.resize(sizeof(run_request_t) + fit.size() * sizeof(watchpoint_t));
+                std::memcpy(payload_fit.data() + sizeof(run_request_t), fit.data(), fit.size() * sizeof(watchpoint_t));
+            }
+            session.handle_request(make_request(OP_RUN, 2, payload_fit.data(), payload_fit.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_OK);
+            CHECK(target.applied_wp_addresses.size() == MAX_HARDWARE_WATCHPOINTS);
+        }
+
+        // One more watchpoint than the session table is rejected outright.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.hw_wp_override = 99;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+
+            std::vector<watchpoint_t> too_many;
+            for (std::size_t index = 0; index < MAX_HARDWARE_WATCHPOINTS + 1; ++index) {
+                too_many.push_back(watchpoint_t{static_cast<std::uint32_t>(index + 1),
+                                                mock_target_t::RAM_BASE + 0x400 + index * 4, WATCH_WRITE, 4, 1, 0});
+            }
+            auto payload = run_payload(session.get_stop_id(), RUN_CONTINUE, {}, {});
+            run_request_t *run = reinterpret_cast<run_request_t *>(payload.data());
+            run->watchpoint_count = static_cast<std::uint16_t>(too_many.size());
+            payload.resize(sizeof(run_request_t) + too_many.size() * sizeof(watchpoint_t));
+            std::memcpy(payload.data() + sizeof(run_request_t), too_many.data(),
+                        too_many.size() * sizeof(watchpoint_t));
+
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_WATCHPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+            CHECK(target.applied_wp_addresses.empty());
+        }
+
+        // RUN_TO_ADDRESS with no advertised hardware slot at all: the protocol
+        // calls this "no available slot", so it is NO_BREAKPOINT_SLOT.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.hw_bp_override = 0;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(session.get_stop_id(), RUN_TO_ADDRESS, {}, {},
+                                             mock_target_t::RAM_BASE + 0x300);
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_BREAKPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+        }
+
+        // RUN_TO_ADDRESS when the requested hardware set already consumes the only slot.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.hw_bp_override = 1;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_TO_ADDRESS,
+                {breakpoint_t{1, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_HARDWARE, 0, 1, 0}}, {},
+                mock_target_t::RAM_BASE + 0x300);
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_NO_BREAKPOINT_SLOT);
+            CHECK(target.resume_calls == 0);
+        }
+
+        // The same address may reuse a requested hardware breakpoint for run-to.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.hw_bp_override = 1;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            tx_frames.clear();
+            const std::uint64_t address = mock_target_t::RAM_BASE + 0x100;
+            const auto payload = run_payload(
+                session.get_stop_id(), RUN_TO_ADDRESS,
+                {breakpoint_t{1, address, BREAKPOINT_HARDWARE, 0, 1, 0}}, {}, address);
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            CHECK(response_status(tx_frames.size() - 1) == STATUS_OK);
+            CHECK(target.resume_calls == 1);
+        }
+    }
+
+    // ---- Test 38: attach response is sanitized to what the session serves ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        target.caps_extra = static_cast<std::uint32_t>(CAP_MEMORY_VECTOR | CAP_UART_LOG_STREAM |
+                                                       CAP_RTT_LOG_STREAM | CAP_POST_MORTEM |
+                                                       CAP_TARGET_GDB_STUB);
+        target.hw_bp_override = 99;
+        target.hw_wp_override = 0;
+        target.max_xfer_override = 65535;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        const auto view = parse_frame(0);
+        CHECK(view.valid);
+        CHECK(view.header->opcode == OP_ATTACH);
+        CHECK(view.header->kind == KIND_RESPONSE);
+        const auto *resp = reinterpret_cast<const attach_response_t *>(view.payload);
+        CHECK(resp->status == STATUS_OK);
+        const std::uint32_t caps = static_cast<std::uint32_t>(resp->capabilities);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_MEMORY_VECTOR)) == 0);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_UART_LOG_STREAM)) == 0);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_RTT_LOG_STREAM)) == 0);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_POST_MORTEM)) == 0);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_TARGET_GDB_STUB)) == 0);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_HARDWARE_BP)) != 0);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_WATCHPOINT)) == 0);
+        CHECK(resp->hardware_breakpoints == MAX_HARDWARE_BREAKPOINTS);
+        CHECK(resp->hardware_watchpoints == 0);
+        CHECK(resp->max_memory_transfer == MAX_MEMORY_TRANSFER);
+
+        // A feature bit with no usable slot is dropped from the response.
+        {
+            tx_frames.clear();
+            mock_target_t no_slots;
+            no_slots.hw_bp_override = 0;
+            mock_backend_t no_slots_backend(no_slots);
+            sidp_session no_slots_session(no_slots_backend, capture_tx);
+            CHECK(no_slots_session.init() == ESP_OK);
+            attach_request_t no_halt{};
+            no_halt.halt_after_attach = 0;
+            no_slots_session.handle_request(make_request(OP_ATTACH, 1, &no_halt, sizeof(no_halt)));
+            const auto *no_slots_resp = reinterpret_cast<const attach_response_t *>(parse_frame(0).payload);
+            CHECK(no_slots_resp->hardware_breakpoints == 0);
+            CHECK((static_cast<std::uint32_t>(no_slots_resp->capabilities) &
+                   static_cast<std::uint32_t>(CAP_HARDWARE_BP)) == 0);
+        }
+    }
+
+    // ---- Test 39: memory transfers are bounded by the advertised limit ----
+    {
+        // Advertised 16 bytes: oversized read/write are rejected before the backend.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.max_xfer_override = 16;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            const int reads_before = target.read_mem_calls;
+            const int writes_before = target.write_mem_calls;
+
+            read_memory_request_t read{};
+            read.stop_id = session.get_stop_id();
+            read.address = mock_target_t::RAM_BASE;
+            read.length = 32;
+            read.flags = MEM_ACCESS_REQUIRE_HALTED;
+            tx_frames.clear();
+            session.handle_request(make_request(OP_READ_MEMORY, 2, &read, sizeof(read)));
+            CHECK(response_status(0) == STATUS_INVALID_ARGUMENT);
+            CHECK(target.read_mem_calls == reads_before);
+
+            read.length = 16;
+            tx_frames.clear();
+            session.handle_request(make_request(OP_READ_MEMORY, 3, &read, sizeof(read)));
+            CHECK(response_status(0) == STATUS_OK);
+            CHECK(target.read_mem_calls == reads_before + 1);
+
+            std::vector<std::uint8_t> write32(sizeof(write_memory_request_t) + 32);
+            auto *w32 = reinterpret_cast<write_memory_request_t *>(write32.data());
+            w32->stop_id = session.get_stop_id();
+            w32->address = mock_target_t::RAM_BASE;
+            w32->length = 32;
+            w32->flags = MEM_ACCESS_REQUIRE_HALTED;
+            tx_frames.clear();
+            session.handle_request(make_request(OP_WRITE_MEMORY, 4, write32.data(), write32.size()));
+            CHECK(response_status(0) == STATUS_INVALID_ARGUMENT);
+            CHECK(target.write_mem_calls == writes_before);
+
+            std::vector<std::uint8_t> write16(sizeof(write_memory_request_t) + 16);
+            auto *w16 = reinterpret_cast<write_memory_request_t *>(write16.data());
+            *w16 = *w32;
+            w16->length = 16;
+            tx_frames.clear();
+            session.handle_request(make_request(OP_WRITE_MEMORY, 5, write16.data(), write16.size()));
+            CHECK(response_status(0) == STATUS_OK);
+            CHECK(target.write_mem_calls == writes_before + 1);
+
+            std::vector<std::uint8_t> write0(sizeof(write_memory_request_t));
+            auto *w0 = reinterpret_cast<write_memory_request_t *>(write0.data());
+            *w0 = *w32;
+            w0->length = 0;
+            tx_frames.clear();
+            session.handle_request(make_request(OP_WRITE_MEMORY, 6, write0.data(), write0.size()));
+            CHECK(response_status(0) == STATUS_INVALID_ARGUMENT);
+            CHECK(target.write_mem_calls == writes_before + 1);
+        }
+
+        // max_memory_transfer == 0 means the protocol default 4096.
+        {
+            tx_frames.clear();
+            mock_target_t target;
+            target.max_xfer_override = 0;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            const auto *attach_resp = reinterpret_cast<const attach_response_t *>(parse_frame(0).payload);
+            CHECK(attach_resp->max_memory_transfer == DEFAULT_MAX_MEMORY_TRANSFER);
+
+            read_memory_request_t read{};
+            read.stop_id = session.get_stop_id();
+            read.address = mock_target_t::RAM_BASE;
+            read.length = DEFAULT_MAX_MEMORY_TRANSFER;
+            read.flags = MEM_ACCESS_REQUIRE_HALTED;
+            tx_frames.clear();
+            session.handle_request(make_request(OP_READ_MEMORY, 2, &read, sizeof(read)));
+            CHECK(response_status(0) == STATUS_OK);
+
+            read.length = DEFAULT_MAX_MEMORY_TRANSFER + 1;
+            tx_frames.clear();
+            session.handle_request(make_request(OP_READ_MEMORY, 3, &read, sizeof(read)));
+            CHECK(response_status(0) == STATUS_INVALID_ARGUMENT);
+        }
+    }
+
+    // ---- Test 40: reset capability bits without a reset method are stripped ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        target.caps_remove = static_cast<std::uint32_t>(CAP_RESET_SYSTEM);
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        const auto *resp = reinterpret_cast<const attach_response_t *>(parse_frame(0).payload);
+        const std::uint32_t caps = static_cast<std::uint32_t>(resp->capabilities);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_RESET_HALT)) == 0);
+        CHECK((caps & static_cast<std::uint32_t>(CAP_RESET_RUN)) == 0);
+
+        tx_frames.clear();
+        reset_request_t reset_req{};
+        reset_req.kind = RESET_SYSTEM;
+        session.handle_request(make_request(OP_RESET_HALT, 2, &reset_req, sizeof(reset_req)));
+        CHECK(response_status(0) == STATUS_UNSUPPORTED);
+        CHECK(target.reset_calls == 0);
+    }
+
+    // ---- Test 41: every request carrying a core_id requires the v1 value 0 ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        const int reads_before = target.read_mem_calls;
+
+        // READ_REGISTERS with a non-zero core id is rejected before the backend.
+        read_registers_request_t read_regs{};
+        read_regs.stop_id = session.get_stop_id();
+        read_regs.core_id = 1;
+        read_regs.register_count = 0;
+        tx_frames.clear();
+        session.handle_request(make_request(OP_READ_REGISTERS, 2, &read_regs, sizeof(read_regs)));
+        CHECK(response_status(0) == STATUS_INVALID_ARGUMENT);
+
+        // RUN with a non-zero core id is rejected and never resumes.
+        auto run = run_payload(session.get_stop_id(), RUN_CONTINUE);
+        auto *mutable_run = reinterpret_cast<run_request_t *>(run.data());
+        mutable_run->core_id = 7;
+        tx_frames.clear();
+        session.handle_request(make_request(OP_RUN, 3, run.data(), run.size()));
+        CHECK(response_status(0) == STATUS_INVALID_ARGUMENT);
+        CHECK(target.resume_calls == 0);
+        CHECK(target.read_mem_calls == reads_before);
+
+        // The same requests with core_id == 0 succeed.
+        read_regs.core_id = 0;
+        tx_frames.clear();
+        session.handle_request(make_request(OP_READ_REGISTERS, 4, &read_regs, sizeof(read_regs)));
+        CHECK(response_status(0) == STATUS_OK);
+
+        mutable_run->core_id = 0;
+        tx_frames.clear();
+        session.handle_request(make_request(OP_RUN, 5, run.data(), run.size()));
+        CHECK(response_status(0) == STATUS_OK);
+        CHECK(target.resume_calls == 1);
+    }
+
+    // ---- Test 42: a backend without CAP_STOP_SNAPSHOT degrades STOPPED ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        target.caps_remove = static_cast<std::uint32_t>(CAP_STOP_SNAPSHOT);
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+
+        const int reads_before = target.read_mem_calls;
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        CHECK(tx_frames.size() == 2);
+        const auto *attach_resp = reinterpret_cast<const attach_response_t *>(parse_frame(0).payload);
+        CHECK((static_cast<std::uint32_t>(attach_resp->capabilities) &
+               static_cast<std::uint32_t>(CAP_STOP_SNAPSHOT)) == 0);
+
+        const auto *stopped = reinterpret_cast<const stopped_event_t *>(parse_frame(1).payload);
+        CHECK(stopped->stop_id == 1);
+        CHECK(stopped->reason == STOP_USER_HALT);
+        CHECK(stopped->register_count == 0);
+        CHECK(stopped->stack_length == 0);
+        CHECK(stopped->stack_address == 0);
+        CHECK(target.read_mem_calls == reads_before);
+    }
+
+    // ---- Test 43: RUN rejects a vector catch outside the advertised mask ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        tx_frames.clear();
+
+        auto payload = run_payload(session.get_stop_id(), RUN_CONTINUE);
+        auto *run = reinterpret_cast<run_request_t *>(payload.data());
+        // VECTOR_CATCH_USAGE_FAULT is not in the mock's advertised mask.
+        run->vector_catch_mask = VECTOR_CATCH_USAGE_FAULT;
+        session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+        CHECK(response_status(tx_frames.size() - 1) == STATUS_UNSUPPORTED);
+        CHECK(target.resume_calls == 0);
+        CHECK(target.last_vector_catch == 0);
+
+        // An advertised mask is accepted and programmed.
+        run->vector_catch_mask = static_cast<vector_catch_t>(VECTOR_CATCH_RESET | VECTOR_CATCH_HARD_FAULT);
+        tx_frames.clear();
+        session.handle_request(make_request(OP_RUN, 3, payload.data(), payload.size()));
+        CHECK(response_status(0) == STATUS_OK);
+        CHECK(target.resume_calls == 1);
+        CHECK(target.last_vector_catch ==
+              static_cast<std::uint32_t>(VECTOR_CATCH_RESET | VECTOR_CATCH_HARD_FAULT));
+    }
+
+    // ---- Test 44: stack snapshot clamps SP below the snapshot margin ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        target.region_base = 0;   // a RAM region at address 0
+        target.snapshot_sp = 32;  // below STACK_SNAPSHOT_BELOW (64)
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        CHECK(tx_frames.size() == 2);
+        const auto *stopped = reinterpret_cast<const stopped_event_t *>(parse_frame(1).payload);
+        // SP - 64 would underflow; the start must clamp to the region base (0).
+        CHECK(stopped->stack_address == 0);
+        CHECK(stopped->stack_length == 32 + STACK_SNAPSHOT_ABOVE);
+    }
+
+    // ---- Test 45: a RAM region without MEM_READ is not snapshotted or patched ----
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        target.ram_flags = static_cast<memory_flag_t>(MEM_WRITE | MEM_EXECUTE); // no MEM_READ
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+        const int reads_before = target.read_mem_calls;
+
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+
+        const auto *stopped = reinterpret_cast<const stopped_event_t *>(parse_frame(1).payload);
+        CHECK(stopped->stack_length == 0);
+        CHECK(stopped->stack_address == 0);
+        CHECK(target.read_mem_calls == reads_before); // no snapshot read
+
+        // Software breakpoints must read the original instruction first.
+        tx_frames.clear();
+        const auto run = run_payload(
+            session.get_stop_id(), RUN_CONTINUE,
+            {breakpoint_t{7, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_SOFTWARE, 2, 1, 0}});
+        session.handle_request(make_request(OP_RUN, 2, run.data(), run.size()));
+        CHECK(response_status(tx_frames.size() - 1) == STATUS_INVALID_ARGUMENT);
+        CHECK(target.resume_calls == 0);
+        CHECK(target.write_mem_calls == 0);
     }
 
     // A lost response or event ends the connection, even if the sink recovers.

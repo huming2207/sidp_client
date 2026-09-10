@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -167,7 +168,14 @@ namespace sidp
         std::size_t tx_size = 0;
         std::size_t tx_offset = 0;
         bool frame_discarded = false;
-        bool initialized = false;
+        /**
+         * @brief Set only after init() has created the queues and buffers.
+         *
+         * Read from the TinyUSB callback task, so it is atomic: the application
+         * may forward a device event before init() has run, and that event must
+         * not touch the queue mutex or ring pointers while they are being built.
+         */
+        std::atomic<bool> initialized{false};
         std::uint32_t decoder_epoch = 0;
         bool dtr = false; // TinyUSB callback task only.
         bool receiving_frame = false;

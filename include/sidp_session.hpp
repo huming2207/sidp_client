@@ -17,6 +17,21 @@ namespace sidp
     /** @brief Maximum hardware breakpoint comparators tracked by the session. */
     inline constexpr std::size_t MAX_HARDWARE_BREAKPOINTS = 16;
 
+    /** @brief Maximum hardware watchpoint comparators tracked by the session. */
+    inline constexpr std::size_t MAX_HARDWARE_WATCHPOINTS = 16;
+
+    /** @brief Protocol default when the backend leaves max_memory_transfer at 0. */
+    inline constexpr std::uint32_t DEFAULT_MAX_MEMORY_TRANSFER = 4096;
+
+    /**
+     * @brief Largest single memory transfer that still fits one SIDP frame.
+     *
+     * Bounded by the write request prefix, which is the wider of the read and
+     * write request headers, so one advertised limit is safe for both.
+     */
+    inline constexpr std::uint32_t MAX_MEMORY_TRANSFER =
+        MAX_FRAME_SIZE - sizeof(msg_header_t) - sizeof(write_memory_request_t);
+
     /** @brief Maximum memory regions copied from the attach response. */
     inline constexpr std::size_t MAX_MEMORY_REGIONS = 64;
 
@@ -150,11 +165,43 @@ namespace sidp
             /* LOST     */ {gate_type::LOST, gate_type::LOST, gate_type::ALLOW, gate_type::LOST, gate_type::LOST, gate_type::LOST, gate_type::LOST, gate_type::LOST, gate_type::LOST, gate_type::LOST},
         };
 
+        /**
+         * @brief Capability bits this session actually implements and serves.
+         *
+         * Anything outside this mask is stripped from the attach response so a
+         * backend bug cannot turn into a wire-level capability lie. In
+         * particular the reserved ESP32 GDB-Stub bits and the log-stream and
+         * memory-vector capabilities have no session handler yet.
+         */
+        static constexpr std::uint32_t HANDLED_CAPABILITIES =
+            static_cast<std::uint32_t>(CAP_STOP_SNAPSHOT) |
+            static_cast<std::uint32_t>(CAP_SOFTWARE_BP) |
+            static_cast<std::uint32_t>(CAP_HARDWARE_BP) |
+            static_cast<std::uint32_t>(CAP_WATCHPOINT) |
+            static_cast<std::uint32_t>(CAP_SINGLE_STEP) |
+            static_cast<std::uint32_t>(CAP_RESET_HALT) |
+            static_cast<std::uint32_t>(CAP_RESET_SYSTEM) |
+            static_cast<std::uint32_t>(CAP_RESET_NRST) |
+            static_cast<std::uint32_t>(CAP_RESET_RUN) |
+            static_cast<std::uint32_t>(CAP_FPU);
+
         /** @brief Maps an opcode to its gating-table column; 0xFF when unknown. */
         [[nodiscard]] static std::uint8_t gate_column(opcode_t opcode) noexcept;
 
         /** @brief Raw bits of a memory access flag set. */
         [[nodiscard]] static std::uint16_t flag_bits(memory_access_flag_t flags) noexcept;
+
+        /** @brief True when the attach-advertised capability bit is set. */
+        [[nodiscard]] bool has_capability(capability_t cap) const noexcept;
+
+        /**
+         * @brief Sanitizes a backend attach result before it reaches the peer.
+         *
+         * Strips unhandled capability bits, clamps breakpoint/watchpoint counts
+         * to what this session can track, drops a feature capability that has no
+         * usable resource, and clamps max_memory_transfer to one frame.
+         */
+        void normalize_attach_info(attach_info_t &info) noexcept;
 
         // ---- Frame assembly -------------------------------------------------
         /** @brief Begins a frame; returns the payload pointer or nullptr when oversized. */
@@ -260,6 +307,12 @@ namespace sidp
         bool transport_dead = false;
         capability_t capabilities = static_cast<capability_t>(0);
         vector_catch_t supported_vector_catch = VECTOR_CATCH_NONE;
+        /** @brief Hardware comparator slots the peer may use (attach-sanitized). */
+        std::uint16_t hardware_breakpoint_limit = 0;
+        /** @brief Hardware watchpoint slots the peer may use (attach-sanitized). */
+        std::uint16_t hardware_watchpoint_limit = 0;
+        /** @brief Largest single memory transfer the peer may request. */
+        std::uint32_t max_memory_transfer = DEFAULT_MAX_MEMORY_TRANSFER;
         run_action_t running_action = RUN_CONTINUE;
         bool run_to_active = false;
         std::uint64_t active_run_to_address = 0;

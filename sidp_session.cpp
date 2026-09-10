@@ -79,20 +79,22 @@ namespace sidp
 
     void sidp_session::release_storage() noexcept
     {
+        // init() allocates with heap_caps_calloc(), so release with the matching
+        // capability-aware allocator instead of plain free().
         if (sw_table != nullptr) {
-            free(sw_table);
+            heap_caps_free(sw_table);
             sw_table = nullptr;
         }
         if (regions != nullptr) {
-            free(regions);
+            heap_caps_free(regions);
             regions = nullptr;
         }
         if (pending_registers != nullptr) {
-            free(pending_registers);
+            heap_caps_free(pending_registers);
             pending_registers = nullptr;
         }
         if (scratch != nullptr) {
-            free(scratch);
+            heap_caps_free(scratch);
             scratch = nullptr;
         }
         tx_frame_size = 0;
@@ -275,6 +277,82 @@ namespace sidp
 
     // ---- ATTACH / DETACH / GET_STATE -------------------------------------------------
 
+    bool sidp_session::has_capability(capability_t cap) const noexcept
+    {
+        return (static_cast<std::uint32_t>(capabilities) & static_cast<std::uint32_t>(cap)) != 0;
+    }
+
+    void sidp_session::normalize_attach_info(attach_info_t &info) noexcept
+    {
+        std::uint32_t caps = static_cast<std::uint32_t>(info.capabilities);
+
+        const std::uint32_t unhandled = caps & ~HANDLED_CAPABILITIES;
+        if (unhandled != 0) {
+            ESP_LOGW(TAG, "attach: backend advertised unhandled capabilities 0x%lx; stripping",
+                     static_cast<unsigned long>(unhandled));
+        }
+        caps &= HANDLED_CAPABILITIES;
+
+        std::uint16_t hw_bp = info.hardware_breakpoints;
+        std::uint16_t hw_wp = info.hardware_watchpoints;
+        if (hw_bp > MAX_HARDWARE_BREAKPOINTS) {
+            ESP_LOGW(TAG, "attach: clamping hardware breakpoints %u -> %u", hw_bp,
+                     static_cast<unsigned>(MAX_HARDWARE_BREAKPOINTS));
+            hw_bp = static_cast<std::uint16_t>(MAX_HARDWARE_BREAKPOINTS);
+        }
+        if (hw_wp > MAX_HARDWARE_WATCHPOINTS) {
+            ESP_LOGW(TAG, "attach: clamping hardware watchpoints %u -> %u", hw_wp,
+                     static_cast<unsigned>(MAX_HARDWARE_WATCHPOINTS));
+            hw_wp = static_cast<std::uint16_t>(MAX_HARDWARE_WATCHPOINTS);
+        }
+
+        // A feature bit with no usable resource would let the peer issue a
+        // request the session can never satisfy. The session must not advertise it.
+        if ((caps & static_cast<std::uint32_t>(CAP_HARDWARE_BP)) != 0 && hw_bp == 0) {
+            ESP_LOGW(TAG, "attach: CAP_HARDWARE_BP without slots; stripping");
+            caps &= ~static_cast<std::uint32_t>(CAP_HARDWARE_BP);
+        }
+        if ((caps & static_cast<std::uint32_t>(CAP_WATCHPOINT)) != 0 && hw_wp == 0) {
+            ESP_LOGW(TAG, "attach: CAP_WATCHPOINT without slots; stripping");
+            caps &= ~static_cast<std::uint32_t>(CAP_WATCHPOINT);
+        }
+        // Cortex-M software breakpoints are resumed with an internal single step
+        // (section 10.4), so advertising CAP_SOFTWARE_BP without CAP_SINGLE_STEP
+        // would promise step-over the backend cannot perform.
+        if ((caps & static_cast<std::uint32_t>(CAP_SOFTWARE_BP)) != 0 &&
+            (caps & static_cast<std::uint32_t>(CAP_SINGLE_STEP)) == 0) {
+            ESP_LOGW(TAG, "attach: CAP_SOFTWARE_BP without CAP_SINGLE_STEP; stripping");
+            caps &= ~static_cast<std::uint32_t>(CAP_SOFTWARE_BP);
+        }
+        const std::uint32_t reset_methods =
+            static_cast<std::uint32_t>(CAP_RESET_SYSTEM) | static_cast<std::uint32_t>(CAP_RESET_NRST);
+        if ((caps & static_cast<std::uint32_t>(CAP_RESET_HALT)) != 0 && (caps & reset_methods) == 0) {
+            ESP_LOGW(TAG, "attach: CAP_RESET_HALT without a reset method; stripping");
+            caps &= ~static_cast<std::uint32_t>(CAP_RESET_HALT);
+        }
+        if ((caps & static_cast<std::uint32_t>(CAP_RESET_RUN)) != 0 && (caps & reset_methods) == 0) {
+            ESP_LOGW(TAG, "attach: CAP_RESET_RUN without a reset method; stripping");
+            caps &= ~static_cast<std::uint32_t>(CAP_RESET_RUN);
+        }
+
+        // 0 means "use the protocol default"; never advertise more than one frame fits.
+        std::uint32_t max_xfer = info.max_memory_transfer;
+        if (max_xfer == 0) {
+            max_xfer = DEFAULT_MAX_MEMORY_TRANSFER;
+        }
+        if (max_xfer > MAX_MEMORY_TRANSFER) {
+            ESP_LOGW(TAG, "attach: clamping max memory transfer %lu -> %lu",
+                     static_cast<unsigned long>(max_xfer),
+                     static_cast<unsigned long>(MAX_MEMORY_TRANSFER));
+            max_xfer = MAX_MEMORY_TRANSFER;
+        }
+
+        info.capabilities = static_cast<capability_t>(caps);
+        info.hardware_breakpoints = hw_bp;
+        info.hardware_watchpoints = hw_wp;
+        info.max_memory_transfer = static_cast<std::uint16_t>(max_xfer);
+    }
+
     void sidp_session::op_attach(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept
     {
         if (attached) {
@@ -302,9 +380,15 @@ namespace sidp
             send_backend_failure(OP_ATTACH, request_id, result, STATUS_SWD_ERROR);
             return;
         }
+        // The session must not expose a capability or resource limit it cannot
+        // serve, so sanitize the backend's report before using it anywhere.
+        normalize_attach_info(info);
 
         attached = true;
         capabilities = info.capabilities;
+        hardware_breakpoint_limit = info.hardware_breakpoints;
+        hardware_watchpoint_limit = info.hardware_watchpoints;
+        max_memory_transfer = info.max_memory_transfer;
         supported_vector_catch = info.supported_vector_catch_mask;
         stop_id = 0;
         clear_debug_state();
@@ -495,7 +579,10 @@ namespace sidp
             return;
         }
 
-        if (req.length == 0 || req.length > MAX_FRAME_SIZE - sizeof(msg_header_t) - sizeof(read_memory_response_t)) {
+        // The peer must not ask for more than the attach response advertised.
+        if (req.length == 0 ||
+            req.length > max_memory_transfer ||
+            req.length > MAX_FRAME_SIZE - sizeof(msg_header_t) - sizeof(read_memory_response_t)) {
             send_response(OP_READ_MEMORY, request_id, STATUS_INVALID_ARGUMENT);
             return;
         }
@@ -543,8 +630,9 @@ namespace sidp
         const std::uint16_t flags = flag_bits(req.flags);
         const bool require_halted = (flags & static_cast<std::uint16_t>(MEM_ACCESS_REQUIRE_HALTED)) != 0;
         const bool allow_running = (flags & static_cast<std::uint16_t>(MEM_ACCESS_ALLOW_RUNNING)) != 0;
+        // Subtract instead of adding req.length so a 32-bit size_t cannot wrap.
         if (require_halted == allow_running ||
-            payload.size() != sizeof(write_memory_request_t) + req.length) {
+            payload.size() - sizeof(write_memory_request_t) != req.length) {
             send_response(OP_WRITE_MEMORY, request_id, STATUS_INVALID_ARGUMENT);
             return;
         }
@@ -561,6 +649,13 @@ namespace sidp
             }
         } else if (req.stop_id != 0) {
             // allow_running requires stop_id = 0 (section 9).
+            send_response(OP_WRITE_MEMORY, request_id, STATUS_INVALID_ARGUMENT);
+            return;
+        }
+
+        // The payload is confirmed to match req.length; now enforce the
+        // attach-advertised transfer limit before touching the backend.
+        if (req.length == 0 || req.length > max_memory_transfer) {
             send_response(OP_WRITE_MEMORY, request_id, STATUS_INVALID_ARGUMENT);
             return;
         }
@@ -618,6 +713,11 @@ namespace sidp
             return;
         }
         const auto &req = *reinterpret_cast<const read_registers_request_t *>(payload.data());
+        if (req.core_id != 0) {
+            // v1 exposes exactly one core; core_id is fixed at 0 (protocol section 8).
+            send_response(OP_READ_REGISTERS, request_id, STATUS_INVALID_ARGUMENT);
+            return;
+        }
         if (payload.size() != sizeof(read_registers_request_t) + static_cast<std::size_t>(req.register_count) * sizeof(register_id_t)) {
             send_response(OP_READ_REGISTERS, request_id, STATUS_INVALID_ARGUMENT);
             return;
@@ -746,6 +846,11 @@ namespace sidp
         }
         const auto &req = *reinterpret_cast<const run_request_t *>(payload.data());
 
+        if (req.core_id != 0) {
+            // v1 exposes exactly one core; core_id is fixed at 0 (protocol section 10).
+            send_response(OP_RUN, request_id, STATUS_INVALID_ARGUMENT);
+            return;
+        }
         if (req.stop_id != stop_id) {
             send_response(OP_RUN, request_id, STATUS_STALE_STOP);
             return;
@@ -759,6 +864,10 @@ namespace sidp
         if (req.action == RUN_TO_ADDRESS &&
             ((req.run_to_address & 1u) != 0 || !is_executable_range(req.run_to_address, 2, false))) {
             send_response(OP_RUN, request_id, STATUS_ADDRESS_ERROR);
+            return;
+        }
+        if (req.action == RUN_SINGLE_STEP && !has_capability(CAP_SINGLE_STEP)) {
+            send_response(OP_RUN, request_id, STATUS_UNSUPPORTED);
             return;
         }
         const auto requested_vector_catch = static_cast<std::uint32_t>(req.vector_catch_mask);
@@ -777,10 +886,12 @@ namespace sidp
             return;
         }
 
-        constexpr std::size_t MAX_WP = 16;
-        if (req.breakpoint_count > MAX_HARDWARE_BREAKPOINTS + MAX_SOFTWARE_BREAKPOINTS ||
-            req.watchpoint_count > MAX_WP) {
+        if (req.breakpoint_count > MAX_HARDWARE_BREAKPOINTS + MAX_SOFTWARE_BREAKPOINTS) {
             send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
+            return;
+        }
+        if (req.watchpoint_count > MAX_HARDWARE_WATCHPOINTS) {
+            send_response(OP_RUN, request_id, STATUS_NO_WATCHPOINT_SLOT);
             return;
         }
 
@@ -798,6 +909,11 @@ namespace sidp
                 return;
             }
             if (entry.kind == BREAKPOINT_SOFTWARE) {
+                // Section 10: insufficient capability or slots is NO_BREAKPOINT_SLOT.
+                if (!has_capability(CAP_SOFTWARE_BP)) {
+                    send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
+                    return;
+                }
                 if ((entry.instruction_size != 2 && entry.instruction_size != 4) ||
                     (entry.address & 1u) != 0 ||
                     !is_executable_range(entry.address, entry.instruction_size, true)) {
@@ -811,12 +927,17 @@ namespace sidp
                 sw_entries[requested_sw_count++] = bp_entry_t{entry.breakpoint_id, entry.address, entry.kind,
                                                               entry.instruction_size, entry.temporary};
             } else {
+                // Section 10: insufficient capability or slots is NO_BREAKPOINT_SLOT.
+                if (!has_capability(CAP_HARDWARE_BP) || hardware_breakpoint_limit == 0) {
+                    send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
+                    return;
+                }
                 if (entry.instruction_size != 0 || (entry.address & 1u) != 0 ||
                     !is_executable_range(entry.address, 2, false)) {
                     send_response(OP_RUN, request_id, STATUS_INVALID_ARGUMENT);
                     return;
                 }
-                if (requested_hw_count == MAX_HARDWARE_BREAKPOINTS) {
+                if (requested_hw_count >= hardware_breakpoint_limit) {
                     send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
                     return;
                 }
@@ -825,8 +946,36 @@ namespace sidp
             }
         }
 
+        // RUN_TO_ADDRESS needs one temporary FPB comparator (section 10.1).
+        // It may reuse a requested hardware breakpoint at the same address;
+        // otherwise a free advertised slot must remain. A backend with no
+        // usable slot at all is "no available slot", so the wire contract
+        // answer is NO_BREAKPOINT_SLOT in both cases.
+        if (req.action == RUN_TO_ADDRESS) {
+            bool reuses_requested = false;
+            for (std::size_t index = 0; index < requested_hw_count; ++index) {
+                if (hw_entries[index].address == req.run_to_address) {
+                    reuses_requested = true;
+                    break;
+                }
+            }
+            if (!reuses_requested && requested_hw_count >= hardware_breakpoint_limit) {
+                send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
+                return;
+            }
+        }
+
         const auto *wps = reinterpret_cast<const watchpoint_t *>(payload.data() + fixed + bp_bytes);
-        wp_entry_t wp_entries[MAX_WP]{};
+        wp_entry_t wp_entries[MAX_HARDWARE_WATCHPOINTS]{};
+        // Section 10: no CAP_WATCHPOINT or no slots is NO_WATCHPOINT_SLOT.
+        if (req.watchpoint_count != 0 && !has_capability(CAP_WATCHPOINT)) {
+            send_response(OP_RUN, request_id, STATUS_NO_WATCHPOINT_SLOT);
+            return;
+        }
+        if (req.watchpoint_count > hardware_watchpoint_limit) {
+            send_response(OP_RUN, request_id, STATUS_NO_WATCHPOINT_SLOT);
+            return;
+        }
         for (std::size_t index = 0; index < req.watchpoint_count; ++index) {
             const watchpoint_t &entry = wps[index];
             if (entry.watchpoint_id == 0 || entry.enabled != 1 ||
@@ -1229,7 +1378,8 @@ namespace sidp
             if (offset + entry_size > pending_registers_size) {
                 break;
             }
-            if (entry->register_id == ARM_REG_SP && entry->value_size == sizeof(sp)) {
+            if (entry->register_id == ARM_REG_SP && entry->value_size == sizeof(sp) &&
+                (entry->flags & REGISTER_VALUE_FLAG_UNAVAILABLE) == 0) {
                 std::memcpy(&sp, reinterpret_cast<const std::uint8_t *>(entry) + sizeof(register_value_t), sizeof(sp));
                 found = true;
                 break;
@@ -1240,12 +1390,18 @@ namespace sidp
             return;
         }
 
-        // Clip the range to the RAM region containing SP (64-bit math; the
-        // register blob must always leave room for the event headers).
+        // Clip the range to the readable RAM region containing SP (64-bit math;
+        // the register blob must always leave room for the event headers).
         const memory_region_t *region = nullptr;
         for (std::size_t index = 0; index < region_count; ++index) {
             const memory_region_t &candidate = regions[index];
-            if (candidate.type == MEMORY_RAM && sp >= candidate.start && sp < candidate.start + candidate.length) {
+            const auto candidate_flags = static_cast<std::uint8_t>(candidate.flags);
+            if (candidate.type != MEMORY_RAM ||
+                (candidate_flags & static_cast<std::uint8_t>(MEM_READ)) == 0 ||
+                candidate.start > UINT64_MAX - candidate.length) {
+                continue;
+            }
+            if (sp >= candidate.start && sp < candidate.start + candidate.length) {
                 region = &candidate;
                 break;
             }
@@ -1255,7 +1411,9 @@ namespace sidp
         }
 
         const std::uint64_t region_end = region->start + region->length;
-        std::uint64_t start = static_cast<std::uint64_t>(sp) - STACK_SNAPSHOT_BELOW;
+        // Guard the subtraction: SP below the snapshot margin must clamp to 0,
+        // not wrap around the 64-bit space.
+        std::uint64_t start = (sp > STACK_SNAPSHOT_BELOW) ? (static_cast<std::uint64_t>(sp) - STACK_SNAPSHOT_BELOW) : 0;
         std::uint64_t end = static_cast<std::uint64_t>(sp) + STACK_SNAPSHOT_ABOVE;
         if (start < region->start) {
             start = region->start;
@@ -1688,10 +1846,16 @@ namespace sidp
                 continue;
             }
             const auto flags = static_cast<std::uint8_t>(region.flags);
+            // A writable software-breakpoint region must also be readable:
+            // the session reads the original instruction and substitutes it on
+            // READ_MEMORY. Hardware-only callers pass require_writable = false
+            // and must not need read permission just to install a comparator.
+            const bool readable = (flags & static_cast<std::uint8_t>(MEM_READ)) != 0;
             if (address >= region.start && address + size <= region.start + region.length &&
                 (flags & static_cast<std::uint8_t>(MEM_EXECUTE)) != 0 &&
                 (!require_writable ||
-                 (region.type == MEMORY_RAM && (flags & static_cast<std::uint8_t>(MEM_WRITE)) != 0))) {
+                 (region.type == MEMORY_RAM && readable &&
+                  (flags & static_cast<std::uint8_t>(MEM_WRITE)) != 0))) {
                 return true;
             }
         }
