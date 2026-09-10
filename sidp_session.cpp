@@ -863,9 +863,12 @@ namespace sidp
         target_lost_reason_t step_lost_reason = TARGET_LOST_SWD_FAULT;
         const step_over_t step = execute_step_over(req.action, step_stop, step_lost_reason);
         if (step == step_over_t::FAILED || step == step_over_t::FAILED_LOST) {
-            const bool rolled_back = rollback_run_config();
+            // FAILED_LOST means the step may still be executing. Cleanup must
+            // wait for handle_disconnect() to establish halt first.
+            const bool rolled_back = step == step_over_t::FAILED_LOST || rollback_run_config();
             if (!rolled_back && step == step_over_t::FAILED) {
                 send_response(OP_RUN, request_id, STATUS_SWD_ERROR);
+                enter_lost(TARGET_LOST_SWD_FAULT);
                 return;
             }
             send_response(OP_RUN, request_id,
@@ -889,12 +892,9 @@ namespace sidp
 
         const esp_err_t resume_result = backend.resume(req.action, req.run_to_address);
         if (resume_result != ESP_OK) {
-            const bool rolled_back = rollback_run_config();
-            if (!rolled_back && resume_result != ESP_FAIL) {
-                send_response(OP_RUN, request_id, STATUS_SWD_ERROR);
-            } else {
-                send_backend_failure(OP_RUN, request_id, resume_result, STATUS_SWD_ERROR);
-            }
+            // A failed acknowledgement does not prove that resume did not happen.
+            send_response(OP_RUN, request_id, STATUS_TARGET_LOST);
+            enter_lost(resume_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT);
             return;
         }
 
@@ -1341,11 +1341,10 @@ namespace sidp
             }
             return step_over_t::FAILED;
         }
-        if (backend.resume(RUN_SINGLE_STEP, 0) != ESP_OK) {
-            if (bp != nullptr) {
-                (void)sw_bp_install_one(*bp);
-            }
-            return step_over_t::FAILED;
+        const esp_err_t step_result = backend.resume(RUN_SINGLE_STEP, 0);
+        if (step_result != ESP_OK) {
+            lost_reason = step_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT;
+            return step_over_t::FAILED_LOST;
         }
 
         // A single step on real hardware completes within a few DHCSR polls.
@@ -1354,9 +1353,6 @@ namespace sidp
         for (int attempt = 0; attempt < 100; ++attempt) {
             const esp_err_t poll_result = backend.poll_halted(stop);
             if (poll_result != ESP_OK) {
-                if (bp != nullptr) {
-                    (void)sw_bp_install_one(*bp);
-                }
                 lost_reason = poll_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT;
                 return step_over_t::FAILED_LOST;
             }
@@ -1367,9 +1363,6 @@ namespace sidp
         }
         if (!halted) {
             // Target state unknown after an unconsummated step: terminal (§10.4).
-            if (bp != nullptr) {
-                (void)sw_bp_install_one(*bp);
-            }
             lost_reason = TARGET_LOST_TIMEOUT;
             return step_over_t::FAILED_LOST;
         }
@@ -1384,7 +1377,7 @@ namespace sidp
 
         // A clean step only sets the step/halt/external bits; anything else
         // (fault, vector catch, watchpoint, another breakpoint) must surface.
-        const bool real_stop = stop.lockup || stop.comparator_match ||
+        const bool real_stop = stop.lockup || stop.fault || stop.watchpoint_match || stop.comparator_match ||
                                (stop.dfsr & 0x0000000Eu) != 0; // BKPT | DWTTRAP | VCATCH
         if (real_stop) {
             step_stop = stop;
