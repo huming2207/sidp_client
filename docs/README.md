@@ -12,8 +12,13 @@ Cortex-M4 的 FPU 是可选能力。SIDP 以 attach 时返回的 `SIDP_CAP_FPU` 
 - **Soul Interconnect**：未来的云端会话匹配和中继服务。
 - **Soul Injector**：实际调试器硬件。
 
+## 当前开发入口
+
+先看 [当前实施计划](target-support-roadmap.md#11-当前实施计划2026-09-10-调整)。当前优先级是USB + 现有M4板的真实SWD控制闭环。下列协议与扩展设计不代表功能已经实现，也不应全部成为首个里程碑的验收项。
+
 ## 文档索引
 
+- [integration.md](integration.md)：组件连接生命周期、USB回调和清理重试接线。
 - [architecture.md](architecture.md)：总体架构、责任边界和典型调试流程。
 - [sidp-protocol.md](sidp-protocol.md)：Soul Agent 与 Soul Injector 之间的极简二进制协议。
 - [sidp-addition-esp32-gdbstub.md](sidp-addition-esp32-gdbstub.md)：未来通过目标UART连接ESP32 panic GDB Stub的SIDP扩展设计。

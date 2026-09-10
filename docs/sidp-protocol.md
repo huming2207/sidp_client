@@ -36,7 +36,7 @@ SIDP v1 非目标：
 
 ## 2. 传输与字节序
 
-- 传输使用 WebSocket binary message。
+- 网络传输使用 WebSocket binary message；本地USB使用现有CDC/SLIP transport。SLIP解码后的每个packet同样包含一个完整SIDP message，并使用相同大小限制和CRC。
 - 一个 WebSocket message 必须包含一个完整 SIDP message。
 - WebSocket 分片由接收端 transport 负责重组：Soul Injector 侧的 WebSocket transport 已实现协议级 continuation 帧重组（esp_websocket_client 不替应用层重组分片）。Soul Agent 不应主动发送分片帧，但双方都必须容忍接收到分片帧。
 - SIDP v1 只支持 little-endian 主机和目标，不实现大端兼容。
@@ -132,10 +132,9 @@ payload（WebSocket message size - 12）
 CRC失败时接收端无法信任 `request_id`，所以只能静默丢帧；恢复责任在Soul Agent：
 
 1. 每个Request启动本地timeout。建议普通读操作5秒，HALT/RESET/DETACH等控制操作30秒；具体值由Soul Agent配置，必须明显大于当前网络RTT。
-2. timeout后将原 `request_id` 放入本连接的late-response忽略表；迟到Response不得再改变GDB可见状态。
-3. GET_STATE、READ_MEMORY和READ_REGISTERS等只读请求可在条件仍成立时用新 `request_id` 重试一次；带 `stop_id` 的请求还必须确认停止世代未变化。
-4. RUN、RESET、DETACH、WRITE_MEMORY和WRITE_REGISTERS不得自动重放，因为原请求可能已经执行。Soul Agent先用新ID发送GET_STATE探测；写操作还应使相关cache失效，并按需读回验证。无法确定状态时终止GDB session，而不是猜测。
-5. GET_STATE也超时、WebSocket断开或连续协议错误达到本地阈值时，将目标视为TARGET_LOST并关闭连接。
+2. 任一Request超时后，结束当前GDB/SIDP会话、关闭连接并清除cache。不在旧连接继续发送GET_STATE探测，也不维护迟到Response忽略表。
+3. 不自动重试或重放任何Request。尤其写入、RUN或reset可能已经执行；超时不表示操作没有发生。重新连接后必须重新attach并获取真实状态。
+4. 连接关闭或控制帧无法交付时，Soul Injector执行本地断线清理。新连接不得接收旧连接残留的Request、Response或Event。
 
 WebSocket ping/pong只判断链路存活，不替代SIDP Request timeout。
 

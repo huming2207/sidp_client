@@ -217,61 +217,52 @@ STOPPED
 
 新架构应先尝试通过新profile、Soul Agent mapping和Soul Injector固件中的target backend接入现有SIDP。只有现有操作模型无法表达必需语义时，才增加新opcode或升级major version。
 
-## 11. 建议实现顺序
+## 11. 当前实施计划（2026-09-10 调整）
 
-按以下阶段实施；上一阶段的验收条件没有满足前，不把后续可选能力塞进固件。
+前面的架构清单是目标范围，不是开工前必须全部实现的依赖树。先完成一块现有M4板的USB调试闭环，再增加功能。M0/M3仍在v1目标范围内，但不阻塞M4开发里程碑；没有实机记录就不能声称验证通过。
 
-### 阶段1：锁定wire contract和host测试
+### 当前代码实际到了哪里
 
-1. 固定消息头、CRC、8 KiB上限、所有enum数值、Arm寄存器ID和struct size。
-2. 用host单元测试覆盖正常encode/decode、截断payload、错误count、CRC失败、未知version和request timeout后的迟到Response。
-3. 用mock target覆盖DETACHED/HALTED/RUNNING/LOST状态表和Response-before-Event竞态。
+- 已有wire定义、CRC、CDC/SLIP和WebSocket transport，以及带mock backend的session测试。
+- session已实现基础控制、内存/寄存器访问、快照、软件断点shadow和step-over；这些是host模型覆盖，不是硬件验证。
+- 本组件只有 `sidp::target_backend_t` 接口，没有真实SWD实现。主工程的 `swd_cortexm_backend` 是烧录接口的实现，不能直接作为SIDP backend使用；主工程main目前也没有SIDP调用点。
+- `READ_MEMORY_VECTOR`、日志配置和ESP32 GDB Stub目前没有session handler，不得声明对应能力。
+- WebSocket实现是主动连接的client，不等于已经有局域网WSS server、配对流程或Soul Interconnect。
 
-完成条件：Soul Agent与Soul Injector共享同一组golden binary frame，所有结构变化都会使测试失败。
+### 下一步：USB + 一块M4 + 最小控制闭环
 
-### 阶段2：现有Cortex-M4实板的基础控制
+1. 在主工程添加一个直接调用现有 `swd_*` 的SIDP backend adapter。先完成attach、halt/poll、寄存器读取、RAM/Flash读取、continue和detach；只报告真正可用的能力。未实现的可选操作返回unsupported，空断点/watchpoint集合与空vector catch配置应能成功清理。
+2. 明确由一个固定debug任务拥有SWD，和现有烧录流程互斥。先做简单的独占切换，不引入通用调度框架或多backend注册系统。
+3. 接入现有CDC/SLIP，用一个小型主机脚本发送真实SIDP帧，验证attach → STOPPED → read → continue → halt → detach。此时不要求完整Soul Agent UI、GDB或云服务。
+4. 每次request/poll返回后检查session和transport的 `needs_disconnect()`；置位则关闭连接并在debug任务调用 `handle_disconnect()`，确认返回true。新连接使用新session，旧RX/TX数据由transport丢弃。
 
-1. 从本地target YAML选择目标、生成memory map，并用CPUID/可用vendor probe验证配置。
-2. 完成attach、GET_STATE、寄存器读写、RAM/Flash读取和精确MMIO访问；Flash WRITE_MEMORY必须明确拒绝。
-3. 完成HALT、RUN、system reset-halt、nRST reset-halt和RESET_RUN。
-4. 完成vector catch mask、STOPPED原因、完整寄存器和栈快照。
+完成条件：记录实际目标型号、FPU情况、接线和使用的固件revision；连续执行上述流程，并验证拔线后目标清理。不要把mock的两条寄存器记录当作完整M4快照的证明。
 
-完成条件：所有控制操作有确定Response时机；错误状态不会让目标意外resume。
+transport现在要求显式 `begin_session()`，断线、队列溢出和异步发送失败会锁定当前会话；新物理连接、旧TX结束和旧RX buffer归还后才能接受新会话。控制和日志分队列，控制入队不等待空间。应用接线步骤见 [组件集成](integration.md)。尤其要转发TinyUSB设备事件，不能只靠轮询 `is_open()` 检测快速拔插。
 
-### 阶段3：断点和清理语义
+session断线清理固定使用keep-halted，尚未接入YAML中的resume策略。`handle_disconnect()` 返回false时必须保留session和SWD所有权，重试清理成功后才允许新调试/烧录会话；不能丢失尚未恢复的原始指令记录。
 
-1. 完成FPB、DWT和single-step。
-2. 分别验证16位Thumb及32位Thumb-2软件断点：shadow、PC规范化、内部step-over、补插和READ_MEMORY遮罩。
-3. 验证temporary断点由Soul Agent从下一次完整集合删除。
-4. 验证DETACH、reset和断线时恢复RAM patch并清理FPB/DWT。
+### 然后：最小GDB体验
 
-完成条件：断点增删、命中、单步、detach和断线后，目标内存中都不会遗留未知BKPT。
+- 实现RAM/寄存器写入、single-step和FPB硬件断点，接Soul Agent的最小RSP子集。
+- 先只使用硬件断点，资源用尽明确报错；现有RAM软件断点实现保留测试，但在实机验证shadow/step-over/失败清理前不要声明能力。
+- 增加实际可用的reset方法、完整寄存器和小块栈快照；已有快照代码可以复用。
+- GDB负责ELF/DWARF和栈展开，Agent先只缓存当前STOPPED，不做自适应预读、RTOS provider或ELF/DWARF解析框架。
 
-### 阶段4：Soul Agent与延迟优化
+完成条件：能在一个实际程序中打断点、查看寄存器/栈、单步和继续；断线/错误路径不会让带未知patch的目标继续运行。
 
-1. 完成GDB RSP基础包、Arm寄存器映射、stop cache和memory block cache。
-2. 分别测试带/不带 `SIDP_CAP_FPU` 的M4；带FPU STOPPED包含S0-S31/FPSCR或unavailable条目，首次GDB `g` 不访问WAN。
-3. 映射D、k、R/vRun、monitor reset；明确拒绝GDB vFlash/load并提示使用烧录流程。
-4. 完成FreeRTOS Cortex-M provider，保持所有thread awareness在Soul Agent。
+### 再按需求扩展
 
-完成条件：200ms RTT模拟下，首次 `?`、`g` 和普通栈backtrace主要命中本地cache。
+1. 验证软件断点、DWT、其余reset路径以及M4有/无FPU差异。
+2. 需要远程使用时增加鉴权WSS和连接生命周期测试，然后才接云中继。网络调试启用前必须完成鉴权，不能把它推迟到上线以后。
+3. M3/M0实板补齐v1验证；使用实际差异指导公共代码提取。
+4. 测量真实RTT和SWD吞吐后，再决定memory block cache、vector read和预读是否值得实现。
+5. UART/RTT、FreeRTOS awareness作为独立增量；ESP32 panic stub、Armv8-M和RISC-V继续留在未来设计中。
 
-### 阶段5：日志、鉴权和网络
+### 保留什么，简化什么
 
-1. 先完成UART log stream，再实现可抢占的低优先级RTT polling。
-2. 完成首次配对、WSS、token校验、单控制会话和鉴权失败限速。
-3. 完成局域网端到端测试，再接入Soul Interconnect测试跨境RTT、CRC丢帧、Request timeout和断线清理。
+保留12字节头、CRC、stop_id、单请求顺序、Response-before-Event和严格内存边界。这些都已有用途和代码，删除它们会引入兼容性或调试正确性成本。
 
-完成条件：日志背压不阻塞控制消息；未配对客户端无法attach或halt目标。
+不为未来架构重写现有Cortex-M session，不提前新增opcode。软件断点复杂是因为patch需要恢复，不适合靠删错误处理来“简化”；首个backend不声明该能力即可避开硬件bring-up负担。
 
-### 阶段6：补齐M3和M0实机
-
-1. 抽出ARMv7-M公共层，实现Cortex-M3 profile；先用mock/回放，再补M3实板。
-2. 抽出ARMv6-M差异，实现Cortex-M0 profile和受限FPB场景；先用mock/回放，再补M0实板。
-3. 分别验证M0/M3/M4的寄存器表、reset方法、断点数量、vector catch和FreeRTOS saved context。
-
-完成条件：v1发布报告明确列出三种core的实板型号与测试结果；缺少实板的profile不得标记为已验证。
-
-### 阶段7：v1之后
-
-先按真实需求实现ESP32 panic GDB Stub扩展；Armv8-M、完整RISC-V硬件debug和调试会话内Flash编程继续独立评估，不提前扩张v1。
+v1请求超时直接结束连接并重新attach，不维护迟到response表，也不自动重试或重放操作。这样与“连接就是会话”的规则一致；后续有实际需求时再设计恢复机制。

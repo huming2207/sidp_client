@@ -1,5 +1,7 @@
 # Soul Agent：缓存、预读与 RTOS Thread Awareness
 
+本文是Agent后续设计参考。当前先完成基本RSP和当前停止现场cache；自动预读、RTOS provider、vector read和日志均不阻塞首个USB/M4调试闭环。实施顺序以 [当前计划](target-support-roadmap.md#11-当前实施计划2026-09-10-调整) 为准。
+
 ## 1. Soul Agent 内部分层
 
 ```text
