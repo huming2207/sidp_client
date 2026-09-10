@@ -76,6 +76,7 @@ namespace sidp
          * and the session stays unallocated; a retry is allowed.
          *
          * @return ESP_OK on success.
+         * @return ESP_ERR_INVALID_ARG when the TX sink is null.
          * @return ESP_ERR_NO_MEM when a buffer cannot be allocated.
          * @return ESP_ERR_INVALID_STATE when already initialized.
          */
@@ -92,8 +93,22 @@ namespace sidp
          */
         void handle_poll() noexcept;
 
-        /** @brief Performs session teardown for a lost transport connection. */
-        void handle_disconnect() noexcept;
+        /**
+         * @brief Ends this connection and performs best-effort target cleanup.
+         * Call on the debug task on link loss or when needs_disconnect() is true.
+         * Returns true only after cleanup succeeds. On false, retain this object
+         * and retry cleanup before allowing another debug/programming session.
+         * Create a new session for a new connection; this object stays closed.
+         */
+        bool handle_disconnect() noexcept;
+
+        /**
+         * @brief True after TX rejection or disconnect; no more requests are accepted.
+         * The owner must close the link and call handle_disconnect() on the debug
+         * task after handle_request()/handle_poll() returns. Queue acceptance is
+         * not wire delivery: the owner must also handle asynchronous TX failures.
+         */
+        [[nodiscard]] bool needs_disconnect() const noexcept { return transport_dead; }
 
         /** @brief Current externally visible target state. */
         [[nodiscard]] target_state_t get_state() const noexcept { return state; }
@@ -218,7 +233,7 @@ namespace sidp
             std::uint8_t original[4]{};
         };
 
-        [[nodiscard]] bool sw_bp_apply(const std::span<const bp_entry_t> entries) noexcept;
+        [[nodiscard]] status_t sw_bp_apply(const std::span<const bp_entry_t> entries) noexcept;
         [[nodiscard]] bool sw_bp_install_one(sw_bp_t &entry) noexcept;
         [[nodiscard]] bool sw_bp_restore_all() noexcept;
         [[nodiscard]] bool sw_bp_restore_one(sw_bp_t &entry) noexcept;
@@ -242,6 +257,7 @@ namespace sidp
         std::uint32_t stop_id = 0;
         bool stop_reported = false;
         bool attached = false;
+        bool transport_dead = false;
         capability_t capabilities = static_cast<capability_t>(0);
         vector_catch_t supported_vector_catch = VECTOR_CATCH_NONE;
         run_action_t running_action = RUN_CONTINUE;

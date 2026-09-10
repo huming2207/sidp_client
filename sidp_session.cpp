@@ -42,6 +42,9 @@ namespace sidp
 
     esp_err_t sidp_session::init() noexcept
     {
+        if (tx_sink == nullptr) {
+            return ESP_ERR_INVALID_ARG;
+        }
         if (storage_ready()) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -116,12 +119,17 @@ namespace sidp
 
     bool sidp_session::finish_frame() noexcept
     {
+        if (transport_dead) {
+            return false;
+        }
         const std::span<std::uint8_t> frame(scratch, tx_frame_size);
         if (tx_sink == nullptr || !crc32_hasher::set_message_crc(frame)) {
+            transport_dead = true;
             ESP_LOGE(TAG, "finish_frame: tx sink unavailable or frame size invalid");
             return false;
         }
         if (!tx_sink(frame)) {
+            transport_dead = true;
             ESP_LOGE(TAG, "finish_frame: tx sink rejected frame (%u bytes)", static_cast<unsigned>(tx_frame_size));
             return false;
         }
@@ -183,8 +191,8 @@ namespace sidp
         std::memcpy(blob + pending_registers_size,
                     pending_registers + pending_registers_size, pending_stack_size);
 
-        stop_reported = true;
-        return finish_frame();
+        stop_reported = finish_frame();
+        return stop_reported;
     }
 
     bool sidp_session::send_target_lost(target_lost_reason_t reason) noexcept
@@ -205,7 +213,7 @@ namespace sidp
 
     void sidp_session::handle_request(std::span<const std::uint8_t> message) noexcept
     {
-        if (!transport_intf::is_valid_message_size(message.size())) {
+        if (transport_dead || !transport_intf::is_valid_message_size(message.size())) {
             return;
         }
 
@@ -357,7 +365,8 @@ namespace sidp
             return;
         }
         ESP_LOGI(TAG, "op_attach: attached: arch=%u hw_bp=%u hw_wp=%u regions=%u",
-                 info.architecture, info.hardware_breakpoints, info.hardware_watchpoints, region_count);
+                 info.architecture, info.hardware_breakpoints, info.hardware_watchpoints,
+                 static_cast<unsigned>(region_count));
 
         // Post-attach halt snapshot (§7.1 ATTACH from DETACHED executes attach).
         if (params.halt_after_attach) {
@@ -836,8 +845,9 @@ namespace sidp
         // All-or-nothing installation: software shadow, hardware, watchpoints,
         // vector catch, then resume. Any failure rolls back to a zero
         // configuration and keeps the target halted.
-        if (!sw_bp_apply({sw_entries, requested_sw_count})) {
-            fail_run(request_id, STATUS_INVALID_ARGUMENT);
+        const status_t sw_result = sw_bp_apply({sw_entries, requested_sw_count});
+        if (sw_result != STATUS_OK) {
+            fail_run(request_id, sw_result);
             return;
         }
         if (backend.apply_breakpoints({hw_entries, requested_hw_count}) != ESP_OK) {
@@ -1051,7 +1061,7 @@ namespace sidp
     
     void sidp_session::handle_poll() noexcept
     {
-        if (state != TARGET_RUNNING || !attached) {
+        if (transport_dead || state != TARGET_RUNNING || !attached) {
             return;
         }
 
@@ -1065,22 +1075,32 @@ namespace sidp
         }
     }
 
-    void sidp_session::handle_disconnect() noexcept
+    bool sidp_session::handle_disconnect() noexcept
     {
+        transport_dead = true;
         if (!attached) {
-            return;
+            return true;
         }
-        if (state == TARGET_RUNNING) {
-            stop_detect_t stop{};
-            (void)backend.halt(HALT_TIMEOUT_MS, stop); // internal, unreported
+        // Keep the shadow table and backend ownership until every cleanup step
+        // succeeds. A caller must not replace this object after a failed cleanup.
+        stop_detect_t stop{};
+        const esp_err_t result = backend.halt(HALT_TIMEOUT_MS, stop);
+        if (result != ESP_OK || !stop.halted || !sw_bp_restore_all()) {
+            ESP_LOGE(TAG, "disconnect: cleanup incomplete; retain session and retry");
+            state = TARGET_LOST;
+            return false;
         }
-        (void)sw_bp_restore_all();
-        (void)backend.detach(DETACH_KEEP_HALTED);
+        if (backend.detach(DETACH_KEEP_HALTED) != ESP_OK) {
+            ESP_LOGE(TAG, "disconnect: backend cleanup failed; retain session and retry");
+            state = TARGET_LOST;
+            return false;
+        }
         attached = false;
         state = TARGET_DETACHED;
         stop_id = 0;
         clear_debug_state();
         clear_run_tracking();
+        return true;
     }
 
     // ---- Stop pipeline --------------------------------------------------------------------
@@ -1392,10 +1412,10 @@ namespace sidp
 
     // ---- Software breakpoint shadow table ---------------------------------------------------
 
-    bool sidp_session::sw_bp_apply(const std::span<const bp_entry_t> entries) noexcept
+    status_t sidp_session::sw_bp_apply(const std::span<const bp_entry_t> entries) noexcept
     {
         if (!sw_bp_restore_all()) {
-            return false;
+            return STATUS_SWD_ERROR;
         }
 
         // Stage 1: read and remember every original instruction. Software
@@ -1404,7 +1424,7 @@ namespace sidp
             if (sw_count == MAX_SOFTWARE_BREAKPOINTS) {
                 ESP_LOGE(TAG, "sw_bp_apply: sw bp table full (%u)", static_cast<unsigned>(sw_count));
                 (void)sw_bp_restore_all();
-                return false;
+                return STATUS_INVALID_ARGUMENT;
             }
             for (std::size_t prior = 0; prior < sw_count; ++prior) {
                 const std::uint64_t prior_start = sw_table[prior].address;
@@ -1413,7 +1433,7 @@ namespace sidp
                     ESP_LOGE(TAG, "sw_bp_apply: sw bp intervals overlap @0x%llx",
                              static_cast<unsigned long long>(entry.address));
                     (void)sw_bp_restore_all();
-                    return false;
+                    return STATUS_INVALID_ARGUMENT;
                 }
             }
             sw_bp_t &slot = sw_table[sw_count];
@@ -1427,14 +1447,14 @@ namespace sidp
                 ESP_LOGE(TAG, "sw_bp_apply: sw bp original read failed @0x%llx",
                          static_cast<unsigned long long>(entry.address));
                 (void)sw_bp_restore_all();
-                return false;
+                return STATUS_SWD_ERROR;
             }
             if (entry.instruction_size >= 2 && original[0] == 0x00 && original[1] == 0xBE) {
                 // Never treat an existing BKPT patch as the original (§10.4).
                 ESP_LOGE(TAG, "sw_bp_apply: sw bp @0x%llx is already BKPT-patched",
                          static_cast<unsigned long long>(entry.address));
                 (void)sw_bp_restore_all();
-                return false;
+                return STATUS_INVALID_ARGUMENT;
             }
             std::memcpy(slot.original, original, sizeof(slot.original));
             sw_count++;
@@ -1447,20 +1467,22 @@ namespace sidp
                 ESP_LOGE(TAG, "sw_bp_apply: sw bp patch write failed @0x%llx",
                          static_cast<unsigned long long>(slot.address));
                 (void)sw_bp_restore_all();
-                return false;
+                return STATUS_SWD_ERROR;
             }
         }
         ESP_LOGD(TAG, "sw_bp_apply: sw breakpoints armed: %u", static_cast<unsigned>(sw_count));
-        return true;
+        return STATUS_OK;
     }
 
     bool sidp_session::sw_bp_install_one(sw_bp_t &entry) noexcept
     {
         constexpr std::uint8_t BKPT_PATCH[2] = {0x00, 0xBE};
+        // A failed write may still have changed target memory. Retain its
+        // original instruction until a restoring write succeeds.
+        entry.installed = true;
         if (backend.write_mem(entry.address, BKPT_PATCH, sizeof(BKPT_PATCH), MEM_WIDTH_DEFAULT) != ESP_OK) {
             return false;
         }
-        entry.installed = true;
         return true;
     }
 
@@ -1574,7 +1596,11 @@ namespace sidp
 
     void sidp_session::fail_run(std::uint32_t request_id, status_t status) noexcept
     {
-        send_response(OP_RUN, request_id, rollback_run_config() ? status : STATUS_SWD_ERROR);
+        const bool restored = rollback_run_config();
+        send_response(OP_RUN, request_id, restored ? status : STATUS_SWD_ERROR);
+        if (!restored) {
+            enter_lost(TARGET_LOST_SWD_FAULT);
+        }
     }
 
     // ---- Memory access validation (protocol section 9) -----------------------------------------
