@@ -86,15 +86,15 @@ namespace sidp
         [[nodiscard]] esp_err_t init(tinyusb_cdcacm_itf_t cdc_port) noexcept;
 
         /**
-         * @brief Reports whether the transport can currently exchange data.
-         *
-         * True once init() succeeded and the CDC interface is mounted and
-         * configured by the USB host. USB disconnect is observed here; there
-         * is no explicit close operation.
+         * Forward the composite driver's tinyusb_config_t.event_cb here (or use
+         * this callback directly). Required to observe physical detach even if
+         * the host reconnects between debug task ticks. It performs no SWD work.
          */
-        [[nodiscard]] bool is_open() const noexcept override;
+        static void device_event_callback(tinyusb_event_t *event, void *arg) noexcept;
 
     private:
+        [[nodiscard]] bool physical_link_open() const noexcept override;
+        void reset_wire_buffers() noexcept override;
         cdc_slip_transport() noexcept = default;
         ~cdc_slip_transport() override = default;
 
@@ -146,7 +146,7 @@ namespace sidp
         void reset_frame_state() noexcept;
 
         /** @copydoc packet_queue_transport::deliver_tx_frame */
-        [[nodiscard]] bool deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept override;
+        [[nodiscard]] bool deliver_tx_frame(std::span<const std::uint8_t> frame, bool log) noexcept override;
 
         /** @brief Encodes one SIDP message into the preallocated TX buffer. */
         void encode_message(std::span<const std::uint8_t> message) noexcept;
@@ -168,6 +168,8 @@ namespace sidp
         std::size_t tx_offset = 0;
         bool frame_discarded = false;
         bool initialized = false;
+        std::uint32_t decoder_epoch = 0;
+        bool dtr = false; // TinyUSB callback task only.
         bool receiving_frame = false;
         bool escape_pending = false;
         static constexpr char TAG[] = "sidp_cdc";

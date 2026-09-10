@@ -5,52 +5,109 @@
 
 namespace sidp
 {
+    bool packet_queue_transport::link_is_connected() const noexcept
+    {
+        return connected.load() && physical_link_open();
+    }
+
+    bool packet_queue_transport::is_open() const noexcept
+    {
+        return !dead.load() && link_is_connected();
+    }
+
+    bool packet_queue_transport::needs_disconnect() const noexcept
+    {
+        return !is_open();
+    }
+
+    void packet_queue_transport::drain(RingbufHandle_t ring) noexcept
+    {
+        if (ring == nullptr) return;
+        std::size_t size = 0;
+        while (auto *item = xRingbufferReceive(ring, &size, 0)) {
+            vRingbufferReturnItem(ring, item);
+        }
+    }
+
+    void packet_queue_transport::close_locked() noexcept
+    {
+        dead.store(true);
+        epoch.fetch_add(1);
+        drain(ring_buffer);
+        drain(tx_ring);
+        drain(log_ring);
+        tx_pending = 0;
+    }
+
+    void packet_queue_transport::close_session() noexcept
+    {
+        const std::lock_guard lock(queue_mutex);
+        close_locked();
+    }
+
+    void packet_queue_transport::link_changed(bool up) noexcept
+    {
+        const std::lock_guard lock(queue_mutex);
+        connected.store(up);
+        if (up) ++link_serial;
+        close_locked();
+    }
+
+    esp_err_t packet_queue_transport::begin_session() noexcept
+    {
+        const std::lock_guard lock(queue_mutex);
+        if (ring_buffer == nullptr || !dead.load() || !link_is_connected() ||
+            link_serial == accepted_link_serial || tx_busy || rx_borrowed != 0) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        close_locked();
+        reset_wire_buffers();
+        accepted_link_serial = link_serial;
+        dead.store(false);
+        return ESP_OK;
+    }
 
     esp_err_t packet_queue_transport::start_read(std::uint8_t **buf_out, std::size_t *len_out, std::uint32_t timeout_ms) noexcept
     {
-        if (buf_out == nullptr || len_out == nullptr) {
-            return ESP_ERR_INVALID_ARG;
-        }
-
+        if (buf_out == nullptr || len_out == nullptr) return ESP_ERR_INVALID_ARG;
         *buf_out = nullptr;
         *len_out = 0;
-        if (ring_buffer == nullptr) {
-            return ESP_ERR_INVALID_STATE;
+        const TickType_t start = xTaskGetTickCount();
+        const TickType_t limit = timeout_to_ticks(timeout_ms);
+        for (;;) {
+            {
+                const std::lock_guard lock(queue_mutex);
+                if (!is_open() || ring_buffer == nullptr) return ESP_ERR_INVALID_STATE;
+                auto *packet = static_cast<std::uint8_t *>(xRingbufferReceive(ring_buffer, len_out, 0));
+                if (packet != nullptr) {
+                    ++rx_borrowed;
+                    *buf_out = packet;
+                    return ESP_OK;
+                }
+            }
+            const TickType_t elapsed = xTaskGetTickCount() - start;
+            if (timeout_ms != WAIT_FOREVER && elapsed >= limit) return ESP_ERR_TIMEOUT;
+            const TickType_t slice = timeout_to_ticks(POLL_MS);
+            vTaskDelay(timeout_ms == WAIT_FOREVER || limit - elapsed > slice ? slice : limit - elapsed);
         }
-        if (rx_overflow.exchange(false, std::memory_order_relaxed)) {
-            return ESP_ERR_NO_MEM;
-        }
-
-        std::size_t packet_size = 0;
-        auto *packet = static_cast<std::uint8_t *>(xRingbufferReceive(ring_buffer, &packet_size, timeout_to_ticks(timeout_ms)));
-        if (packet == nullptr) {
-            return is_open() ? ESP_ERR_TIMEOUT : ESP_ERR_INVALID_STATE;
-        }
-
-        *buf_out = packet;
-        *len_out = packet_size;
-        return 0;
     }
 
     void packet_queue_transport::end_read(std::uint8_t *buf_return) noexcept
     {
+        const std::lock_guard lock(queue_mutex);
         if (buf_return != nullptr && ring_buffer != nullptr) {
             vRingbufferReturnItem(ring_buffer, buf_return);
+            --rx_borrowed;
         }
     }
 
     esp_err_t packet_queue_transport::create_queues() noexcept
     {
         ring_buffer = xRingbufferCreateWithCaps(QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
-        if (ring_buffer == nullptr) {
-            ESP_LOGE(TAG, "create_queues: rx ringbuffer allocation failed");
-            return ESP_ERR_NO_MEM;
-        }
         tx_ring = xRingbufferCreateWithCaps(QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
-        if (tx_ring == nullptr) {
-            ESP_LOGE(TAG, "create_queues: tx ringbuffer allocation failed");
-            vRingbufferDeleteWithCaps(ring_buffer);
-            ring_buffer = nullptr;
+        log_ring = xRingbufferCreateWithCaps(LOG_QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
+        if (ring_buffer == nullptr || tx_ring == nullptr || log_ring == nullptr) {
+            destroy_queues();
             return ESP_ERR_NO_MEM;
         }
         return ESP_OK;
@@ -58,125 +115,128 @@ namespace sidp
 
     void packet_queue_transport::destroy_queues() noexcept
     {
-        if (tx_ring != nullptr) {
-            vRingbufferDeleteWithCaps(tx_ring);
-            tx_ring = nullptr;
-        }
-        if (ring_buffer != nullptr) {
-            vRingbufferDeleteWithCaps(ring_buffer);
-            ring_buffer = nullptr;
+        for (auto *ring : {&ring_buffer, &tx_ring, &log_ring}) {
+            if (*ring != nullptr) vRingbufferDeleteWithCaps(*ring);
+            *ring = nullptr;
         }
     }
 
-    void packet_queue_transport::deliver_packet(const std::uint8_t *data, std::size_t size) noexcept
+    void packet_queue_transport::deliver_packet(const std::uint8_t *data, std::size_t size, std::uint32_t received_epoch) noexcept
     {
         const std::span<const std::uint8_t> packet(data, size);
-        if (!is_valid_message_size(size) || !crc32_hasher::verify_message_crc(packet)) {
-            ESP_LOGE(TAG, "deliver_packet: rx frame dropped: bad size or CRC (%u bytes)", static_cast<unsigned>(size));
-            return;
-        }
-
-        if (xRingbufferSend(ring_buffer, data, size, 0) != pdTRUE) {
-            rx_overflow.store(true, std::memory_order_relaxed);
-            ESP_LOGE(TAG, "deliver_packet: rx queue full: frame dropped (%u bytes)", static_cast<unsigned>(size));
+        if (!is_valid_message_size(size) || !crc32_hasher::verify_message_crc(packet)) return;
+        const std::lock_guard lock(queue_mutex);
+        if (!is_open() || received_epoch != epoch.load()) return;
+        if (data[0] != PROTOCOL_VERSION || xRingbufferSend(ring_buffer, data, size, 0) != pdTRUE) {
+            // Losing a request or receiving an unknown layout ends this session.
+            close_locked();
         }
     }
 
     TickType_t packet_queue_transport::timeout_to_ticks(std::uint32_t timeout_ms) noexcept
     {
-        if (timeout_ms == WAIT_FOREVER) {
-            return portMAX_DELAY;
-        }
-        if (timeout_ms == 0) {
-            return 0;
-        }
-
-        const TickType_t ticks = pdMS_TO_TICKS(timeout_ms);
-        return ticks == 0 ? 1 : ticks;
+        if (timeout_ms == WAIT_FOREVER) return portMAX_DELAY;
+        const std::uint64_t ticks = (static_cast<std::uint64_t>(timeout_ms) * configTICK_RATE_HZ + 999) / 1000;
+        return ticks >= portMAX_DELAY ? portMAX_DELAY - 1 : static_cast<TickType_t>(ticks);
     }
 
-    // ---- TX path ---------------------------------------------------------------------------
+    esp_err_t packet_queue_transport::enqueue(std::span<const std::uint8_t> message, bool log) noexcept
+    {
+        if (message.size() < sizeof(msg_header_t)) return ESP_ERR_INVALID_ARG;
+        if (message.size() > (log ? MAX_LOG_FRAME_SIZE : MAX_FRAME_SIZE)) return ESP_ERR_INVALID_SIZE;
+        if (log && reinterpret_cast<const msg_header_t *>(message.data())->kind != KIND_LOG_STREAM) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        const std::lock_guard lock(queue_mutex);
+        if (!is_open() || tx_ring == nullptr) return ESP_ERR_INVALID_STATE;
+        if (xRingbufferSend(log ? log_ring : tx_ring, message.data(), message.size(), 0) != pdTRUE) {
+            tx_dropped.fetch_add(1);
+            if (!log) close_locked();
+            return ESP_ERR_NO_MEM;
+        }
+        ++tx_pending;
+        if (tx_task_handle != nullptr) xTaskNotifyGive(tx_task_handle);
+        return ESP_OK;
+    }
 
     esp_err_t packet_queue_transport::write_message(std::span<const std::uint8_t> message) noexcept
     {
-        if (message.size() < sizeof(msg_header_t)) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        if (message.size() > MAX_FRAME_SIZE) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        if (tx_ring == nullptr) {
-            return ESP_ERR_INVALID_STATE;
-        }
-        if (xRingbufferSend(tx_ring, message.data(), message.size(),
-                            timeout_to_ticks(TX_ENQUEUE_TIMEOUT_MS)) != pdTRUE) {
-            ESP_LOGE(TAG, "write_message: tx queue full for %u ms, frame lost (%u bytes)",
-                     TX_ENQUEUE_TIMEOUT_MS, static_cast<unsigned>(message.size()));
-            return ESP_ERR_TIMEOUT;
-        }
-        tx_queued.fetch_add(1, std::memory_order_relaxed);
-        return ESP_OK;
+        return enqueue(message, false);
     }
 
     esp_err_t packet_queue_transport::write_message_log(std::span<const std::uint8_t> message) noexcept
     {
-        if (message.size() < sizeof(msg_header_t)) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        if (message.size() > MAX_FRAME_SIZE) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        if (tx_ring == nullptr) {
-            return ESP_ERR_INVALID_STATE;
-        }
-        if (xRingbufferSend(tx_ring, message.data(), message.size(), 0) != pdTRUE) {
-            // Counted, not logged: at log-stream rates this could flood the
-            // console. The owner can report tx_dropped_frames() periodically.
-            tx_dropped.fetch_add(1, std::memory_order_relaxed);
-            return ESP_ERR_NO_MEM;
-        }
-        tx_queued.fetch_add(1, std::memory_order_relaxed);
-        return ESP_OK;
+        return enqueue(message, true);
     }
 
     esp_err_t packet_queue_transport::flush_write(std::uint32_t timeout_ms) noexcept
     {
-        if (tx_ring == nullptr) {
-            return ESP_ERR_INVALID_STATE;
-        }
-
         const TickType_t start = xTaskGetTickCount();
-        const TickType_t limit = timeout_ms == WAIT_FOREVER ? portMAX_DELAY : timeout_to_ticks(timeout_ms);
-        while (tx_queued.load(std::memory_order_relaxed) != 0 || tx_busy.load(std::memory_order_relaxed)) {
-            if ((xTaskGetTickCount() - start) >= limit) {
-                ESP_LOGE(TAG, "flush_write: tx queue not drained within %u ms", timeout_ms);
-                return ESP_ERR_TIMEOUT;
+        const TickType_t limit = timeout_to_ticks(timeout_ms);
+        for (;;) {
+            {
+                const std::lock_guard lock(queue_mutex);
+                if (!is_open()) return ESP_ERR_INVALID_STATE;
+                if (tx_pending == 0 && !tx_busy) return ESP_OK;
             }
-            vTaskDelay(pdMS_TO_TICKS(TX_FLUSH_POLL_MS));
+            const TickType_t elapsed = xTaskGetTickCount() - start;
+            if (timeout_ms != WAIT_FOREVER && elapsed >= limit) return ESP_ERR_TIMEOUT;
+            const TickType_t slice = timeout_to_ticks(POLL_MS);
+            vTaskDelay(timeout_ms == WAIT_FOREVER || limit - elapsed > slice ? slice : limit - elapsed);
         }
-        return ESP_OK;
     }
 
     std::uint32_t packet_queue_transport::tx_dropped_frames() const noexcept
     {
-        return tx_dropped.load(std::memory_order_relaxed);
+        return tx_dropped.load();
+    }
+
+    bool packet_queue_transport::tx_idle() noexcept
+    {
+        const std::lock_guard lock(queue_mutex);
+        return !tx_busy;
+    }
+
+    bool packet_queue_transport::service_tx() noexcept
+    {
+        std::size_t size = 0;
+        std::uint8_t *item = nullptr;
+        RingbufHandle_t source = nullptr;
+        bool log = false;
+        {
+            const std::lock_guard lock(queue_mutex);
+            if (!is_open() || tx_busy) return false;
+            source = tx_ring;
+            item = static_cast<std::uint8_t *>(xRingbufferReceive(source, &size, 0));
+            if (item == nullptr) {
+                source = log_ring;
+                log = true;
+                item = static_cast<std::uint8_t *>(xRingbufferReceive(source, &size, 0));
+            }
+            if (item == nullptr) return false;
+            --tx_pending;
+            tx_busy = true;
+        }
+        // A new session cannot begin while this frame is in flight.
+        const bool sent = deliver_tx_frame({item, size}, log);
+        {
+            const std::lock_guard lock(queue_mutex);
+            vRingbufferReturnItem(source, item);
+            if (!sent) {
+                tx_dropped.fetch_add(1);
+                close_locked();
+                ESP_LOGE(TAG, "TX failed; session closed");
+            }
+            tx_busy = false;
+        }
+        return true;
     }
 
     esp_err_t packet_queue_transport::spawn_tx_task(const char *name) noexcept
     {
-        if (tx_ring == nullptr) {
-            ESP_LOGE(TAG, "spawn_tx_task: queues not created");
-            return ESP_ERR_INVALID_STATE;
-        }
-        if (tx_task_handle != nullptr) {
-            ESP_LOGE(TAG, "spawn_tx_task: already spawned");
-            return ESP_ERR_INVALID_STATE;
-        }
-        if (xTaskCreate(tx_task_trampoline, name, TX_TASK_STACK_SIZE, this, TX_TASK_PRIORITY, &tx_task_handle) != pdPASS) {
-            ESP_LOGE(TAG, "spawn_tx_task: task creation failed");
-            return ESP_ERR_NO_MEM;
-        }
-        return ESP_OK;
+        if (tx_ring == nullptr || tx_task_handle != nullptr) return ESP_ERR_INVALID_STATE;
+        return xTaskCreate(tx_task_trampoline, name, TX_TASK_STACK_SIZE, this, TX_TASK_PRIORITY,
+                           &tx_task_handle) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
     }
 
     void packet_queue_transport::tx_task_trampoline(void *arg) noexcept
@@ -186,47 +246,9 @@ namespace sidp
 
     void packet_queue_transport::tx_task_loop() noexcept
     {
-        while (true) {
-            std::size_t size = 0;
-            auto *item = static_cast<std::uint8_t *>(xRingbufferReceive(tx_ring, &size, portMAX_DELAY));
-            if (item == nullptr) {
-                continue;
-            }
-            // Mark busy before decrementing: a concurrent flush_write() seeing
-            // zero queued frames must not miss the frame in flight.
-            tx_busy.store(true, std::memory_order_relaxed);
-            tx_queued.fetch_sub(1, std::memory_order_relaxed);
-            const bool sent = deliver_tx_frame(std::span<const std::uint8_t>(item, size));
-            tx_busy.store(false, std::memory_order_relaxed);
-            vRingbufferReturnItem(tx_ring, item);
-            if (!sent) {
-                ESP_LOGE(TAG, "tx task: frame dropped (%u bytes, link down or send failure)",
-                         static_cast<unsigned>(size));
-            }
+        for (;;) {
+            while (service_tx()) {}
+            ulTaskNotifyTake(pdTRUE, timeout_to_ticks(POLL_MS));
         }
     }
-
-    void packet_queue_transport::drain_tx() noexcept
-    {
-        if (tx_ring == nullptr) {
-            return;
-        }
-
-        std::size_t drained = 0;
-        while (true) {
-            std::size_t size = 0;
-            auto *item = static_cast<std::uint8_t *>(xRingbufferReceive(tx_ring, &size, 0));
-            if (item == nullptr) {
-                break;
-            }
-            vRingbufferReturnItem(tx_ring, item);
-            tx_queued.fetch_sub(1, std::memory_order_relaxed);
-            ++drained;
-        }
-
-        if (drained != 0) {
-            ESP_LOGI(TAG, "drain_tx: discarded %u queued frames", static_cast<unsigned>(drained));
-        }
-    }
-
 }

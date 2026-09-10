@@ -30,6 +30,8 @@ namespace sidp
         }
 
         esp_websocket_client_config_t client_config = config;
+        client_config.disable_auto_reconnect = true;
+        client_config.enable_close_reconnect = false;
         if (client_config.buffer_size < static_cast<int>(MAX_FRAME_SIZE)) {
             client_config.buffer_size = static_cast<int>(MAX_FRAME_SIZE);
         }
@@ -42,7 +44,7 @@ namespace sidp
             return ESP_ERR_INVALID_ARG;
         }
 
-        if (esp_websocket_register_events(websocket_client, WEBSOCKET_EVENT_DATA, websocket_event_handler, this) != ESP_OK) {
+        if (esp_websocket_register_events(websocket_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, this) != ESP_OK) {
             ESP_LOGE(TAG, "init: event handler registration failed");
             esp_websocket_client_destroy(websocket_client);
             destroy_queues();
@@ -56,7 +58,7 @@ namespace sidp
 
         if (esp_websocket_client_start(client) != ESP_OK) {
             ESP_LOGE(TAG, "init: esp_websocket_client_start failed");
-            esp_websocket_unregister_events(websocket_client, WEBSOCKET_EVENT_DATA, websocket_event_handler);
+            esp_websocket_unregister_events(websocket_client, WEBSOCKET_EVENT_ANY, websocket_event_handler);
             esp_websocket_client_destroy(websocket_client);
             initialized = false;
             client = nullptr;
@@ -69,7 +71,8 @@ namespace sidp
         const esp_err_t task_result = spawn_tx_task("sidp_tx_ws");
         if (task_result != ESP_OK) {
             ESP_LOGE(TAG, "init: tx task spawn failed");
-            esp_websocket_unregister_events(websocket_client, WEBSOCKET_EVENT_DATA, websocket_event_handler);
+            esp_websocket_client_stop(websocket_client);
+            esp_websocket_unregister_events(websocket_client, WEBSOCKET_EVENT_ANY, websocket_event_handler);
             esp_websocket_client_destroy(websocket_client);
             initialized = false;
             client = nullptr;
@@ -83,13 +86,13 @@ namespace sidp
         return ESP_OK;
     }
 
-    bool websocket_transport::deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept
+    bool websocket_transport::deliver_tx_frame(std::span<const std::uint8_t> frame, bool log) noexcept
     {
         if (!is_open()) {
             return false;
         }
         const int sent = esp_websocket_client_send_bin(client, reinterpret_cast<const char *>(frame.data()),
-                                                       static_cast<int>(frame.size()), timeout_to_ticks(WS_SEND_TIMEOUT_MS));
+                                                       static_cast<int>(frame.size()), timeout_to_ticks(log ? 20 : WS_SEND_TIMEOUT_MS));
         if (sent == static_cast<int>(frame.size())) {
             return true;
         }
@@ -98,7 +101,18 @@ namespace sidp
         return false;
     }
 
-    bool websocket_transport::is_open() const noexcept
+    esp_err_t websocket_transport::reconnect() noexcept
+    {
+        close_session();
+        if (!initialized || !tx_idle()) return ESP_ERR_INVALID_STATE;
+        const esp_err_t stopped = esp_websocket_client_stop(client);
+        // This API reports ESP_FAIL when the task has already stopped after
+        // a disconnect. Starting again is valid in that case.
+        if (stopped != ESP_OK && stopped != ESP_FAIL) return stopped;
+        return esp_websocket_client_start(client);
+    }
+
+    bool websocket_transport::physical_link_open() const noexcept
     {
         return initialized && esp_websocket_client_is_connected(client);
     }
@@ -107,18 +121,25 @@ namespace sidp
     websocket_transport::websocket_event_handler(void *handler_arg, esp_event_base_t event_base, std::int32_t event_id, void *event_data) noexcept
     {
         (void)event_base;
-        if (handler_arg == nullptr || event_data == nullptr) {
+        if (handler_arg == nullptr) {
             return;
         }
         switch (event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
+            static_cast<websocket_transport *>(handler_arg)->link_changed(true);
+            static_cast<websocket_transport *>(handler_arg)->reset_staging();
             ESP_LOGI(TAG, "websocket_event_handler: websocket connected");
             return;
+        case WEBSOCKET_EVENT_CLOSED:
+        case WEBSOCKET_EVENT_FINISH:
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGE(TAG, "websocket_event_handler: websocket disconnected");
-            static_cast<websocket_transport *>(handler_arg)->drain_tx();
+            static_cast<websocket_transport *>(handler_arg)->link_changed(false);
+            static_cast<websocket_transport *>(handler_arg)->reset_staging();
             return;
         case WEBSOCKET_EVENT_ERROR:
+            static_cast<websocket_transport *>(handler_arg)->link_changed(false);
+            static_cast<websocket_transport *>(handler_arg)->reset_staging();
             ESP_LOGE(TAG, "websocket_event_handler: websocket error event");
             return;
         case WEBSOCKET_EVENT_DATA:
@@ -127,14 +148,19 @@ namespace sidp
             return;
         }
 
-        static_cast<websocket_transport *>(handler_arg)->handle_data(*static_cast<esp_websocket_event_data_t *>(event_data));
+        if (event_data != nullptr) {
+            static_cast<websocket_transport *>(handler_arg)->handle_data(*static_cast<esp_websocket_event_data_t *>(event_data));
+        }
     }
 
     void websocket_transport::handle_data(const esp_websocket_event_data_t &data) noexcept
     {
-        if (!initialized) {
-            return;
+        const auto current_epoch = receive_epoch();
+        if (staging_epoch != current_epoch || !is_open()) {
+            reset_staging();
+            staging_epoch = current_epoch;
         }
+        if (!is_open()) return;
         if (data.payload_len < 0 || data.payload_offset < 0 || data.data_len < 0 ||
             (data.data_len != 0 && data.data_ptr == nullptr)) {
             return;
@@ -168,8 +194,12 @@ namespace sidp
             return;
         }
 
+        if (frame_offset > frame_size || chunk_size > frame_size - frame_offset) {
+            reset_staging();
+            return;
+        }
         if (chunk_size != 0 && !staging_discarded) {
-            if (staging_received + chunk_size > MAX_FRAME_SIZE) {
+            if (chunk_size > MAX_FRAME_SIZE - staging_received) {
                 /* Overlong message: stop copying but keep consuming events
                  * until the FIN bit, so the next message starts clean. */
                 ESP_LOGE(TAG, "handle_data: ws message exceeds frame size, dropped");
@@ -178,7 +208,7 @@ namespace sidp
                 std::memcpy(staging_buffer + staging_received, data.data_ptr, chunk_size);
             }
         }
-        staging_received += chunk_size;
+        if (!staging_discarded) staging_received += chunk_size;
 
         const bool frame_complete = frame_offset + chunk_size >= frame_size;
         if (!data.fin || !frame_complete) {
@@ -187,7 +217,7 @@ namespace sidp
 
         /* The frame carrying FIN is fully consumed: the message is done. */
         if (!staging_discarded) {
-            deliver_packet(staging_buffer, staging_received);
+            deliver_packet(staging_buffer, staging_received, current_epoch);
         }
         reset_staging();
     }

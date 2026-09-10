@@ -3,35 +3,24 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <span>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
-
+#include "freertos/task.h"
 #include "sidp_transport.hpp"
 
 namespace sidp
 {
-
     /**
-     * @brief transport_intf base with a decoded-packet receive queue and an
-     *        outbound frame queue driven by the transport's own TX task.
+     * Complete-packet queues shared by CDC and WebSocket.
+     * A physical connection is not automatically a SIDP session. The owner calls
+     * begin_session() after cleaning up its previous target session. Link loss,
+     * RX overflow and TX failure latch the transport closed until then.
      *
-     * Concrete transports decode their wire format (SLIP, WebSocket) and call
-     * deliver_packet() for every complete candidate; this base validates the
-     * SIDP size and CRC32 and queues accepted packets into one per-instance
-     * NOSPLIT ring buffer. Outbound frames enqueued through write_message()
-     * wait in a second per-instance NOSPLIT ring buffer; the TX task created
-     * by spawn_tx_task() dequeues them and hands each one to the concrete
-     * transport via deliver_tx_frame().
-     *
-     * Each instance owns its own queues; transports that run concurrently
-     * never share a buffer.
-     *
-     * RX: one producer (the transport receive callback) and one consumer (the
-     * start_read() caller) may operate concurrently. TX: any number of
-     * producers (write_message / write_message_expendable) and exactly one
-     * consumer (the TX task).
+     * Queue operations share a short mutex; no wire I/O or wait for queue space
+     * happens under it. Control frames have their own FIFO ahead of bounded logs.
      */
     class packet_queue_transport : public transport_intf
     {
@@ -39,96 +28,80 @@ namespace sidp
         packet_queue_transport(const packet_queue_transport &) = delete;
         packet_queue_transport &operator=(const packet_queue_transport &) = delete;
 
-        /** @copydoc transport_intf::start_read */
+        /**
+         * Accepts the current physical connection as a fresh SIDP session.
+         * Call only after successful target cleanup and stopping old producers.
+         * Returns INVALID_STATE while a TX frame or borrowed RX buffer remains,
+         * or while the physical link is down. Retry from the owner task later.
+         */
+        [[nodiscard]] esp_err_t begin_session() noexcept final;
+        /** Closes the session, discards queued work and latches needs_disconnect(). */
+        void close_session() noexcept final;
+        [[nodiscard]] bool needs_disconnect() const noexcept final;
+        [[nodiscard]] bool is_open() const noexcept final;
+        [[nodiscard]] bool link_is_connected() const noexcept final;
+
         [[nodiscard]] esp_err_t start_read(std::uint8_t **buf_out, std::size_t *len_out, std::uint32_t timeout_ms) noexcept final;
-
-        /** @copydoc transport_intf::end_read */
         void end_read(std::uint8_t *buf_return) noexcept final;
-
-        /** @copydoc transport_intf::write_message */
         [[nodiscard]] esp_err_t write_message(std::span<const std::uint8_t> message) noexcept final;
-
-        /** @copydoc transport_intf::write_message_expendable */
         [[nodiscard]] esp_err_t write_message_log(std::span<const std::uint8_t> message) noexcept final;
-
-        /** @copydoc transport_intf::flush_write */
         [[nodiscard]] esp_err_t flush_write(std::uint32_t timeout_ms) noexcept final;
-
-        /** @copydoc transport_intf::tx_dropped_frames */
         [[nodiscard]] std::uint32_t tx_dropped_frames() const noexcept final;
 
     protected:
         packet_queue_transport() noexcept = default;
         ~packet_queue_transport() override = default;
-
-        /**
-         * @brief Allocates the receive and transmit queues in PSRAM.
-         * @return ESP_OK on success, ESP_ERR_NO_MEM if a queue cannot be allocated.
-         */
         [[nodiscard]] esp_err_t create_queues() noexcept;
-
-        /** @brief Frees both queues. Idempotent. */
         void destroy_queues() noexcept;
-
-        /**
-         * @brief Creates and starts the TX task. Call once from init().
-         * @return ESP_OK on success, ESP_ERR_NO_MEM if the task cannot be created.
-         */
         [[nodiscard]] esp_err_t spawn_tx_task(const char *name) noexcept;
 
-        /**
-         * @brief Discards every queued outbound frame.
-         *
-         * Called by concrete transports when the link goes down: stale frames
-         * from a detached session must never reach a re-attached host. Safe
-         * against the TX task: frames it already dequeued are dropped by
-         * deliver_tx_frame() returning false.
-         */
-        void drain_tx() noexcept;
+        /** Called by link callbacks on both connect and disconnect boundaries. */
+        void link_changed(bool connected) noexcept;
+        [[nodiscard]] virtual bool physical_link_open() const noexcept = 0;
+        /** Called with no TX in flight and the session closed, before acceptance. */
+        virtual void reset_wire_buffers() noexcept {}
+        [[nodiscard]] virtual bool deliver_tx_frame(std::span<const std::uint8_t> frame, bool log) noexcept = 0;
 
         /**
-         * @brief Blocking send primitive for one frame (TX task context).
-         *
-         * Implementations encode/transmit the frame and return false when the
-         * frame could not reach the wire (link down, send error); the base
-         * drops the frame and logs.
+         * RX callbacks sample this token before reading/assembling bytes and pass
+         * it to deliver_packet(). Work started before a boundary is discarded.
          */
-        [[nodiscard]] virtual bool deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept = 0;
-
-        /**
-         * @brief Validates and queues one complete decoded packet.
-         *
-         * Packets failing the SIDP size or CRC check are dropped. When the
-         * queue is full the packet is dropped and the overflow flag is set;
-         * the next start_read() reports @c ESP_ERR_NO_MEM once.
-         *
-         * @param data Decoded packet bytes.
-         * @param size Packet size in bytes.
-         */
-        void deliver_packet(const std::uint8_t *data, std::size_t size) noexcept;
-
-        /** @brief Converts milliseconds to FreeRTOS ticks without rounding down. */
+        [[nodiscard]] std::uint32_t receive_epoch() const noexcept { return epoch.load(); }
+        void deliver_packet(const std::uint8_t *data, std::size_t size, std::uint32_t received_epoch) noexcept;
         [[nodiscard]] static TickType_t timeout_to_ticks(std::uint32_t timeout_ms) noexcept;
+        /** Sends at most one frame; called exclusively by the TX task. */
+        bool service_tx() noexcept;
+        /** Used by connection managers before restarting a physical client. */
+        [[nodiscard]] bool tx_idle() noexcept;
 
     private:
-        /** @brief Capacity of each ring buffer (RX and TX) in PSRAM. */
         static constexpr std::size_t QUEUE_SIZE = 131072;
+        static constexpr std::size_t LOG_QUEUE_SIZE = 4096;
+        static constexpr std::size_t MAX_LOG_FRAME_SIZE = sizeof(msg_header_t) + sizeof(log_data_t) + 1024;
         static constexpr std::size_t TX_TASK_STACK_SIZE = 4096;
         static constexpr UBaseType_t TX_TASK_PRIORITY = 3;
-        /** Poll interval for flush_write(); must be at least one FreeRTOS tick. */
-        static constexpr std::uint32_t TX_FLUSH_POLL_MS = 10;
+        static constexpr std::uint32_t POLL_MS = 10;
         static constexpr char TAG[] = "sidp_tq";
 
+        void close_locked() noexcept;
+        static void drain(RingbufHandle_t ring) noexcept;
+        esp_err_t enqueue(std::span<const std::uint8_t> message, bool log) noexcept;
         static void tx_task_trampoline(void *arg) noexcept;
         void tx_task_loop() noexcept;
 
+        std::mutex queue_mutex;
         RingbufHandle_t ring_buffer = nullptr;
-        std::atomic<bool> rx_overflow{false};
-
         RingbufHandle_t tx_ring = nullptr;
+        RingbufHandle_t log_ring = nullptr;
         TaskHandle_t tx_task_handle = nullptr;
-        std::atomic<int> tx_queued{0};
-        std::atomic<bool> tx_busy{false};
+        std::uint64_t link_serial = 0;
+        std::uint64_t accepted_link_serial = 0;
+        std::size_t rx_borrowed = 0;
+        std::size_t tx_pending = 0;
+        bool tx_busy = false;
+        std::atomic<bool> dead{true};
+        std::atomic<bool> connected{false};
+        std::atomic<std::uint32_t> epoch{0};
         std::atomic<std::uint32_t> tx_dropped{0};
     };
 }

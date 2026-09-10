@@ -25,9 +25,8 @@ namespace sidp
      * message. A complete reassembled packet is validated and queued by the
      * packet_queue_transport base.
      *
-     * The Espressif client owns connection establishment, TLS, keepalive, and
-     * optional automatic reconnect. This class only maps binary messages to
-     * the transport_intf message interface.
+     * The Espressif client owns connection establishment, TLS and keepalive.
+     * Reconnect is explicit after SIDP cleanup, including clean CLOSE events.
      *
      * init() performs all transport-owned allocation. One reader and one
      * writer may operate concurrently; callers must serialize writers.
@@ -62,10 +61,16 @@ namespace sidp
          */
         [[nodiscard]] esp_err_t init(const esp_websocket_client_config_t &config) noexcept;
 
-        /** @copydoc transport_intf::is_open */
-        [[nodiscard]] bool is_open() const noexcept override;
+        /**
+         * Starts a new physical connection after failure. Call from the connection
+         * manager after target cleanup; returns INVALID_STATE until TX is idle.
+         * Automatic reconnect is disabled so a send can never cross connections.
+         * Once connected, the owner must call begin_session().
+         */
+        [[nodiscard]] esp_err_t reconnect() noexcept;
 
     private:
+        [[nodiscard]] bool physical_link_open() const noexcept override;
         websocket_transport() noexcept = default;
         ~websocket_transport() override = default;
 
@@ -82,11 +87,12 @@ namespace sidp
         void reset_staging() noexcept;
 
         /** @copydoc packet_queue_transport::deliver_tx_frame */
-        [[nodiscard]] bool deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept override;
+        [[nodiscard]] bool deliver_tx_frame(std::span<const std::uint8_t> frame, bool log) noexcept override;
 
         esp_websocket_client_handle_t client = nullptr;
         std::uint8_t *staging_buffer = nullptr;
         std::size_t staging_received = 0;
+        std::uint32_t staging_epoch = 0;
         bool staging_active = false;
         bool staging_discarded = false;
         bool initialized = false;

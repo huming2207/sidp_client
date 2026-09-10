@@ -17,23 +17,16 @@ namespace sidp
     inline constexpr std::uint32_t WAIT_FOREVER = std::numeric_limits<std::uint32_t>::max();
 
     /**
-     * @brief How long write_message() waits for TX queue space before it
-     *        gives up and loses the frame. Session responses must not be
-     *        dropped, but a stuck TX task must not wedge the debug task.
-     */
-    inline constexpr std::uint32_t TX_ENQUEUE_TIMEOUT_MS = 10000;
-
-    /**
      * @brief Interface for transporting complete SIDP messages.
      *
      * WebSocket implementations map one SIDP message to one binary WebSocket
      * message. Stream implementations, such as USB CDC-ACM, own their framing
      * and return only the decoded SIDP message.
      *
-     * Each direction owns one queue: decoded inbound frames are received
+     * Control and logs have separate outbound queues: decoded inbound frames are received
      * through start_read(), outbound frames are enqueued with write_message()
      * and drained by the transport's own TX task. One reader and any number
-     * of writers may operate concurrently; the single TX queue preserves
+     * of writers may operate concurrently; the control TX queue preserves
      * Response/Event ordering.
      *
      * Methods return ESP_OK on success and an ESP_ERR_* code on failure.
@@ -45,6 +38,15 @@ namespace sidp
         transport_intf &operator=(const transport_intf &) = delete;
         transport_intf(transport_intf &&) = delete;
         transport_intf &operator=(transport_intf &&) = delete;
+
+        /** Accept a new physical connection only after prior target cleanup. */
+        [[nodiscard]] virtual esp_err_t begin_session() noexcept = 0;
+        /** Latch closed and discard queued work. Does not perform SWD cleanup. */
+        virtual void close_session() noexcept = 0;
+        /** True on link loss, queue overflow or asynchronous TX failure. */
+        [[nodiscard]] virtual bool needs_disconnect() const noexcept = 0;
+        /** Physical link availability, independent of session acceptance. */
+        [[nodiscard]] virtual bool link_is_connected() const noexcept = 0;
 
         /** @brief Destroys the transport interface. */
         virtual ~transport_intf() = default;
@@ -87,25 +89,26 @@ namespace sidp
          * The message is copied into the transport's TX queue; the transport
          * owns the copy and the caller may immediately reuse its buffer. The
          * transport's TX task serializes queued frames onto the wire in FIFO
-         * order. Waits up to TX_ENQUEUE_TIMEOUT_MS for queue space: session
-         * responses and events must not be lost. Frames on a disconnected
-         * transport are dropped by the TX task.
+         * order. Never waits for queue space or wire transmission. Queue overflow
+         * or subsequent send failure latches needs_disconnect(); the owner must
+         * tear down its target session before accepting another connection.
          *
          * @param message Complete SIDP message to send.
          * @return ESP_OK on success.
          * @return ESP_ERR_INVALID_ARG if message is shorter than sizeof(msg_header_t).
          * @return ESP_ERR_INVALID_SIZE if message exceeds MAX_FRAME_SIZE.
          * @return ESP_ERR_INVALID_STATE if the transport is not yet initialized.
-         * @return ESP_ERR_TIMEOUT if the queue stayed full for the whole
-         *         timeout; the frame is lost.
+         * @return ESP_ERR_NO_MEM if the control queue is full; session is closed.
          */
         [[nodiscard]] virtual esp_err_t write_message(std::span<const std::uint8_t> message) noexcept = 0;
 
         /**
          * @brief Enqueues one expendable SIDP message (e.g. a LOG frame).
          *
-         * Never blocks: when the TX queue is full the frame is dropped and
-         * counted in tx_dropped_frames().
+         * Never waits for queue space: logs have a separate bounded queue and
+         * are sent only after queued controls. At most one bounded log frame can
+         * already be in flight when control arrives. Frames are limited to a
+         * 1024-byte log buffer plus headers; overflow drops the log only.
          *
          * @param message Complete SIDP message to send.
          * @return ESP_OK when the message was enqueued.
@@ -126,7 +129,7 @@ namespace sidp
          */
         [[nodiscard]] virtual esp_err_t flush_write(std::uint32_t timeout_ms) noexcept = 0;
 
-        /** @brief Number of frames dropped by write_message_expendable() so far. */
+        /** @brief Number of frames dropped by write_message_log() so far. */
         [[nodiscard]] virtual std::uint32_t tx_dropped_frames() const noexcept = 0;
 
         /**

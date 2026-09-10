@@ -43,7 +43,7 @@ namespace sidp
             .cdc_port = cdc_port,
             .callback_rx = cdc_event_callback,
             .callback_rx_wanted_char = nullptr,
-            .callback_line_state_changed = nullptr,
+            .callback_line_state_changed = cdc_event_callback,
             .callback_line_coding_changed = nullptr,
         };
         const esp_err_t result = tinyusb_cdcacm_init(&cdc_config);
@@ -61,6 +61,8 @@ namespace sidp
         const esp_err_t task_result = spawn_tx_task("sidp_tx_cdc");
         if (task_result != ESP_OK) {
             ESP_LOGE(TAG, "init: tx task spawn failed");
+            tinyusb_cdcacm_unregister_callback(cdc_port, CDC_EVENT_RX);
+            tinyusb_cdcacm_unregister_callback(cdc_port, CDC_EVENT_LINE_STATE_CHANGED);
             initialized = false;
             cdc_port = TINYUSB_CDC_ACM_0;
             frame_buffer = nullptr;
@@ -74,18 +76,25 @@ namespace sidp
         return ESP_OK;
     }
 
-    bool cdc_slip_transport::deliver_tx_frame(std::span<const std::uint8_t> frame) noexcept
+    bool cdc_slip_transport::deliver_tx_frame(std::span<const std::uint8_t> frame, bool log) noexcept
     {
         if (!is_open()) {
             return false;
         }
 
+        // Discard unsent driver bytes on every failed/closed send before the
+        // TX task becomes idle and a new session can be accepted.
+        struct clear_on_exit {
+            tinyusb_cdcacm_itf_t port;
+            ~clear_on_exit() { tud_cdc_n_write_clear(static_cast<std::uint8_t>(port)); }
+        } clear{cdc_port};
+
         // SLIP-encode into the preallocated staging buffer; the TX task is
         // the single consumer, so the staging buffer needs no locking.
         encode_message(frame);
-        const deadline_t deadline{now_ms(), TX_SEND_TIMEOUT_MS};
+        const deadline_t deadline{now_ms(), log ? 20u : TX_SEND_TIMEOUT_MS};
         while (tx_offset < tx_size) {
-            if (!is_open()) {
+            if (!is_open() || remaining_timeout(deadline) == 0) {
                 tx_size = 0;
                 tx_offset = 0;
                 return false;
@@ -122,20 +131,45 @@ namespace sidp
         }
     }
 
-    bool cdc_slip_transport::is_open() const noexcept
+    bool cdc_slip_transport::physical_link_open() const noexcept
     {
         return initialized && tinyusb_cdcacm_initialized(cdc_port) &&
-               tud_cdc_n_ready(static_cast<std::uint8_t>(cdc_port));
+               tud_cdc_n_connected(static_cast<std::uint8_t>(cdc_port));
+    }
+
+    void cdc_slip_transport::reset_wire_buffers() noexcept
+    {
+        tud_cdc_n_read_flush(static_cast<std::uint8_t>(cdc_port));
+        tud_cdc_n_write_clear(static_cast<std::uint8_t>(cdc_port));
+    }
+
+    void cdc_slip_transport::device_event_callback(tinyusb_event_t *event, void *arg) noexcept
+    {
+        (void)arg;
+        if (event == nullptr) return;
+        auto &transport = instance();
+        if (event->id == TINYUSB_EVENT_ATTACHED || event->id == TINYUSB_EVENT_DETACHED) {
+            transport.dtr = false;
+            transport.link_changed(false); // Wait for a new DTR assertion.
+            transport.reset_frame_state();
+            transport.receiving_frame = false;
+        }
     }
 
     void cdc_slip_transport::cdc_event_callback(int itf, cdcacm_event_t *event) noexcept
     {
-        if (event == nullptr || event->type != CDC_EVENT_RX) {
-            return;
-        }
-
+        if (event == nullptr) return;
         auto &transport = instance();
-        if (transport.initialized && static_cast<int>(transport.cdc_port) == itf) {
+        if (!transport.initialized || static_cast<int>(transport.cdc_port) != itf) return;
+        if (event->type == CDC_EVENT_LINE_STATE_CHANGED) {
+            const bool dtr = event->line_state_changed_data.dtr;
+            if (transport.dtr != dtr) {
+                transport.dtr = dtr;
+                transport.link_changed(dtr);
+                transport.reset_frame_state();
+                transport.receiving_frame = false;
+            }
+        } else if (event->type == CDC_EVENT_RX) {
             transport.drain_cdc_input();
         }
     }
@@ -171,10 +205,16 @@ namespace sidp
 
     void cdc_slip_transport::drain_cdc_input() noexcept
     {
+        const auto current_epoch = receive_epoch();
+        if (decoder_epoch != current_epoch || !is_open()) {
+            reset_frame_state();
+            receiving_frame = false;
+            decoder_epoch = current_epoch;
+        }
         if (!is_open()) {
+            tud_cdc_n_read_flush(static_cast<std::uint8_t>(cdc_port));
             return;
         }
-
         while (true) {
             std::size_t bytes_read = 0;
             std::uint8_t chunk[RX_READ_CHUNK_SIZE] = {};
@@ -188,7 +228,7 @@ namespace sidp
                     continue;
                 }
 
-                deliver_packet(frame_buffer, frame_size);
+                deliver_packet(frame_buffer, frame_size, current_epoch);
                 reset_frame_state();
             }
         }
