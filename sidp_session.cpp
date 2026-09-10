@@ -691,6 +691,30 @@ namespace sidp
             return;
         }
 
+        // Validate the entire wire list before the backend can change a register.
+        // Backend-specific IDs and supported widths are still the backend's job.
+        const auto blob = payload.subspan(sizeof(write_registers_request_t));
+        std::size_t offset = 0;
+        bool valid = req.core_id == 0 && req.register_count != 0;
+        for (std::size_t index = 0; valid && index < req.register_count; ++index) {
+            if (blob.size() - offset < sizeof(register_value_t)) {
+                valid = false;
+                break;
+            }
+            const auto *entry = reinterpret_cast<const register_value_t *>(blob.data() + offset);
+            offset += sizeof(register_value_t);
+            if (entry->value_size == 0 || entry->flags != REGISTER_VALUE_FLAG_NONE ||
+                entry->value_size > blob.size() - offset) {
+                valid = false;
+                break;
+            }
+            offset += entry->value_size;
+        }
+        if (!valid || offset != blob.size()) {
+            send_response(OP_WRITE_REGISTERS, request_id, STATUS_INVALID_ARGUMENT);
+            return;
+        }
+
         const esp_err_t result = backend.write_regs(payload.data() + sizeof(write_registers_request_t),
                                                              payload.size() - sizeof(write_registers_request_t));
         if (result != ESP_OK) {
