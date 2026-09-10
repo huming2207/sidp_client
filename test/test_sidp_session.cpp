@@ -31,6 +31,10 @@ struct mock_target_t {
     bool fail_attach = false;
     bool fault_on_next = false; // next op returns FAULT
     bool halt_will_timeout = false;
+    bool fail_after_patch = false;
+    bool fail_restore = false;
+    int writes_while_running = 0;
+    int write_regs_calls = 0;
 
     // Observability
     int halt_calls = 0;
@@ -114,10 +118,13 @@ public:
     esp_err_t poll_halted(stop_detect_t &stop) override
     {
         stop = stop_detect_t{};
+        if (stepping && step_poll_error != ESP_OK) return step_poll_error;
         if (fault_next()) {
             return ESP_FAIL;
         }
         stop.halted = target_.halted;
+        stop.fault = stepping && step_fault_flag;
+        stop.watchpoint_match = stepping && step_watchpoint_flag;
         if (target_.halted) {
             stop.pc = last_pc;
             stop.comparator_match = last_comparator_match;
@@ -150,13 +157,14 @@ public:
     esp_err_t resume(run_action_t action, std::uint64_t) override
     {
         target_.resume_calls++;
+        stepping = action == RUN_SINGLE_STEP;
         if (fault_next()) {
             return ESP_FAIL;
         }
         if (action == RUN_SINGLE_STEP) {
-            // Execute the original instruction: halt again one instruction later.
-            target_.halted = true;
-            target_.running = false;
+            // Execute the original instruction, or simulate a step that never stops.
+            target_.halted = !step_hangs;
+            target_.running = step_hangs;
             step_pc = step_pc + step_advance;
             last_pc = step_pc;
             last_dfsr = step_clean ? 0x20 /* HALT_STEP */ : step_fault_dfsr;
@@ -167,6 +175,12 @@ public:
         }
         return ESP_OK;
     }
+
+    bool stepping = false;
+    bool step_hangs = false;
+    bool step_fault_flag = false;
+    bool step_watchpoint_flag = false;
+    esp_err_t step_poll_error = ESP_OK;
 
     // Step-over scripting: what a resumed single step produces.
     std::uint32_t step_pc = 0;
@@ -222,6 +236,7 @@ public:
 
     esp_err_t write_regs(const std::uint8_t *data, std::size_t size) override
     {
+        ++target_.write_regs_calls;
         if (fault_next()) {
             return ESP_FAIL;
         }
@@ -259,6 +274,9 @@ public:
                         memory_access_width_t width) override
     {
         target_.last_write_width = width;
+        if (target_.running) ++target_.writes_while_running;
+        const bool patch = size == 2 && data[0] == 0 && data[1] == 0xBE;
+        if (target_.fail_restore && !patch) return ESP_ERR_TIMEOUT;
         if (fault_next()) {
             return ESP_FAIL;
         }
@@ -267,6 +285,7 @@ public:
             return ESP_ERR_INVALID_ARG;
         }
         std::memcpy(dst, data, size);
+        if (patch && std::exchange(target_.fail_after_patch, false)) return ESP_ERR_TIMEOUT;
         return ESP_OK;
     }
 
@@ -326,6 +345,15 @@ static bool capture_tx(std::span<const std::uint8_t> frame)
     return true;
 }
 
+static std::size_t reject_after = 0;
+static int tx_attempts = 0;
+
+static bool rejecting_tx(std::span<const std::uint8_t> frame)
+{
+    ++tx_attempts;
+    return tx_frames.size() < reject_after && capture_tx(frame);
+}
+
 struct frame_view_t {
     const msg_header_t *header = nullptr;
     const std::uint8_t *payload = nullptr;
@@ -382,6 +410,27 @@ static status_t response_status(std::size_t index)
 static const msg_header_t *frame_header(std::size_t index)
 {
     return parse_frame(index).header;
+}
+
+static void attach_halted(sidp_session &session)
+{
+    CHECK(session.init() == ESP_OK);
+    attach_request_t req{};
+    req.halt_after_attach = 1;
+    session.handle_request(make_request(OP_ATTACH, 1, &req, sizeof(req)));
+    CHECK(session.get_state() == TARGET_HALTED);
+}
+
+static void run_patch(sidp_session &session, run_action_t action = RUN_CONTINUE)
+{
+    std::array<std::uint8_t, sizeof(run_request_t) + sizeof(breakpoint_t)> payload{};
+    auto *run = reinterpret_cast<run_request_t *>(payload.data());
+    run->stop_id = session.get_stop_id();
+    run->action = action;
+    run->breakpoint_count = 1;
+    auto *bp = reinterpret_cast<breakpoint_t *>(payload.data() + sizeof(*run));
+    *bp = breakpoint_t{7, mock_target_t::RAM_BASE + 0x100, BREAKPOINT_SOFTWARE, 2, 1, 0};
+    session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
 }
 
 int main()
@@ -1695,6 +1744,231 @@ int main()
         const auto *stopped = reinterpret_cast<const stopped_event_t *>(view.payload);
         CHECK(stopped->reason == STOP_RUN_TO_ADDRESS);
         CHECK(stopped->breakpoint_id == 0);
+    }
+
+    // A lost response or event ends the connection, even if the sink recovers.
+    // Fail ATTACH response, initial STOPPED, RUN response, then step STOPPED.
+    for (std::size_t fail_at = 0; fail_at < 4; ++fail_at) {
+        tx_frames.clear();
+        reject_after = fail_at;
+        tx_attempts = 0;
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, rejecting_tx);
+        CHECK(session.init() == ESP_OK);
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+        run_request_t run{};
+        run.stop_id = session.get_stop_id();
+        run.action = RUN_SINGLE_STEP;
+        if (!session.needs_disconnect()) {
+            session.handle_request(make_request(OP_RUN, 2, &run, sizeof(run)));
+        }
+        CHECK(session.needs_disconnect());
+        CHECK(tx_frames.size() == fail_at);
+        CHECK(tx_attempts == static_cast<int>(fail_at + 1));
+
+        const int resumes = target.resume_calls;
+        reject_after = 100; // Recovery of queue space cannot revive the session.
+        session.handle_request(make_request(OP_RUN, 3, &run, sizeof(run)));
+        session.handle_poll();
+        CHECK(target.resume_calls == resumes);
+        CHECK(tx_attempts == static_cast<int>(fail_at + 1));
+        session.handle_disconnect();
+        CHECK(target.halted);
+        CHECK(target.last_detach_action == DETACH_KEEP_HALTED);
+        CHECK(session.get_state() == TARGET_DETACHED);
+        CHECK(session.needs_disconnect());
+        const int halts = target.halt_calls;
+        session.handle_disconnect();
+        CHECK(target.halt_calls == halts);
+        session.handle_request(make_request(OP_ATTACH, 4, &attach_req, sizeof(attach_req)));
+        CHECK(tx_attempts == static_cast<int>(fail_at + 1));
+    }
+
+    {
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, nullptr);
+        CHECK(session.init() == ESP_ERR_INVALID_ARG);
+    }
+
+    // Losing a RUN response with a live RAM patch must still clean up locally.
+    // If halt cannot be confirmed, do not write instructions into running RAM.
+    for (const bool halt_timeout : {false, true}) {
+        tx_frames.clear();
+        reject_after = 2;
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, rejecting_tx);
+        CHECK(session.init() == ESP_OK);
+        attach_request_t attach_req{};
+        attach_req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+        target.mem[0x100] = 0x11;
+        target.mem[0x101] = 0x22;
+        std::array<std::uint8_t, sizeof(run_request_t) + sizeof(breakpoint_t)> payload{};
+        auto *run = reinterpret_cast<run_request_t *>(payload.data());
+        run->stop_id = session.get_stop_id();
+        run->action = RUN_CONTINUE;
+        run->breakpoint_count = 1;
+        auto *bp = reinterpret_cast<breakpoint_t *>(payload.data() + sizeof(run_request_t));
+        bp->breakpoint_id = 7;
+        bp->address = mock_target_t::RAM_BASE + 0x100;
+        bp->kind = BREAKPOINT_SOFTWARE;
+        bp->instruction_size = 2;
+        bp->enabled = 1;
+        session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+        CHECK(session.needs_disconnect());
+        CHECK(target.running);
+        CHECK(target.mem[0x101] == 0xBE);
+        target.halt_will_timeout = halt_timeout;
+        session.handle_disconnect();
+        CHECK(target.mem[0x100] == (halt_timeout ? 0x00 : 0x11));
+        CHECK(target.mem[0x101] == (halt_timeout ? 0xBE : 0x22));
+        CHECK(target.resume_calls == 1);
+        if (halt_timeout) {
+            CHECK(session.get_state() == TARGET_LOST);
+            target.halt_will_timeout = false;
+            CHECK(session.handle_disconnect());
+            CHECK(target.mem[0x100] == 0x11 && target.mem[0x101] == 0x22);
+        }
+        CHECK(target.last_detach_action == DETACH_KEEP_HALTED);
+    }
+
+    // A target write can take effect even when its acknowledgement fails.
+    for (bool restoration_fails : {false, true}) {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        target.mem[0x100] = 0x11; target.mem[0x101] = 0x22;
+        target.fail_after_patch = true;
+        target.fail_restore = restoration_fails;
+        run_patch(session);
+        CHECK(response_status(2) == STATUS_SWD_ERROR);
+        CHECK(target.resume_calls == 0);
+        if (restoration_fails) {
+            CHECK(session.get_state() == TARGET_LOST);
+            CHECK(!session.handle_disconnect());
+            CHECK(target.mem[0x101] == 0xBE);
+            target.fail_restore = false;
+        }
+        CHECK(session.handle_disconnect());
+        CHECK(target.mem[0x100] == 0x11 && target.mem[0x101] == 0x22);
+    }
+
+    // Both resets halt before any patch/resource writes; failed halt changes nothing.
+    for (auto opcode : {OP_RESET_HALT, OP_RESET_RUN}) {
+        for (bool timeout : {false, true}) {
+            tx_frames.clear();
+            mock_target_t target;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            target.mem[0x100] = 0x11; target.mem[0x101] = 0x22;
+            run_patch(session);
+            target.applied_hw_bp_addresses.push_back(0x08000100);
+            target.applied_wp_addresses.push_back(mock_target_t::RAM_BASE);
+            target.last_vector_catch = 1;
+            target.halt_will_timeout = timeout;
+            reset_request_t reset{}; reset.kind = RESET_SYSTEM;
+            const int halts = target.halt_calls;
+            session.handle_request(make_request(opcode, 3, &reset, sizeof(reset)));
+            CHECK(target.halt_calls == halts + 1);
+            CHECK(target.writes_while_running == 0);
+            if (timeout) {
+                CHECK(target.reset_calls == 0);
+                CHECK(target.mem[0x101] == 0xBE);
+                CHECK(response_status(3) == STATUS_TIMEOUT);
+                target.halt_will_timeout = false;
+            } else {
+                CHECK(target.reset_calls == 1);
+                CHECK(target.mem[0x100] == 0x11 && target.mem[0x101] == 0x22);
+                CHECK(target.applied_hw_bp_addresses.empty());
+                CHECK(target.applied_wp_addresses.empty());
+                CHECK(target.last_vector_catch == 0);
+            }
+            CHECK(session.handle_disconnect());
+        }
+    }
+
+    // Reject a malformed register list in full before writing its valid first entry.
+    for (int malformed = 0; malformed < 7; ++malformed) {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        std::vector<std::uint8_t> payload(sizeof(write_registers_request_t) + sizeof(register_value_t) + 4);
+        auto *req = reinterpret_cast<write_registers_request_t *>(payload.data());
+        req->stop_id = session.get_stop_id(); req->register_count = 1;
+        auto *entry = reinterpret_cast<register_value_t *>(payload.data() + sizeof(*req));
+        entry->register_id = ARM_REG_PC; entry->value_size = 4;
+        const std::uint32_t pc = 0x20001234;
+        std::memcpy(payload.data() + sizeof(*req) + sizeof(*entry), &pc, 4);
+        switch (malformed) {
+        case 0: req->register_count = 0; break;
+        case 1: req->register_count = 2; break;
+        case 2: payload.pop_back(); break;
+        case 3: payload.push_back(0); break;
+        case 4: entry->flags = REGISTER_VALUE_FLAG_UNAVAILABLE; break;
+        case 5: entry->value_size = 0; break;
+        case 6: req->core_id = 1; break;
+        }
+        session.handle_request(make_request(OP_WRITE_REGISTERS, 2, payload.data(), payload.size()));
+        CHECK(response_status(2) == STATUS_INVALID_ARGUMENT);
+        CHECK(target.write_regs_calls == 0);
+        CHECK(backend.last_pc == 0x1000);
+    }
+
+    // Backend semantic flags must survive internal step-over, even without DFSR bits.
+    for (bool watchpoint : {false, true}) {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        target.mem[0x100] = 0x11; target.mem[0x101] = 0x22;
+        run_patch(session);
+        target.running = false; target.halted = true;
+        backend.last_pc = mock_target_t::RAM_BASE + 0x102;
+        backend.last_dfsr = 2; // software breakpoint hit
+        session.handle_poll();
+        backend.step_fault_flag = !watchpoint;
+        backend.step_watchpoint_flag = watchpoint;
+        const int resumes = target.resume_calls;
+        run_patch(session);
+        CHECK(target.resume_calls == resumes + 1); // internal step only, no continue
+        CHECK(session.get_state() == TARGET_HALTED);
+        const auto *stop = reinterpret_cast<const stopped_event_t *>(parse_frame(tx_frames.size()-1).payload);
+        CHECK(stop->reason == (watchpoint ? STOP_WATCHPOINT : STOP_FAULT));
+        CHECK(session.handle_disconnect());
+    }
+
+    // An unconfirmed step must not patch or roll back RAM until cleanup halts it.
+    for (auto poll_error : {ESP_OK, ESP_FAIL, ESP_ERR_TIMEOUT}) {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        target.mem[0x100] = 0x11; target.mem[0x101] = 0x22;
+        run_patch(session);
+        target.running = false; target.halted = true;
+        backend.last_pc = mock_target_t::RAM_BASE + 0x102;
+        backend.last_dfsr = 2;
+        session.handle_poll();
+        backend.step_hangs = true;
+        backend.step_poll_error = poll_error;
+        run_patch(session);
+        CHECK(session.get_state() == TARGET_LOST);
+        CHECK(target.running);
+        CHECK(target.writes_while_running == 0);
+        CHECK(session.handle_disconnect());
+        CHECK(target.mem[0x100] == 0x11 && target.mem[0x101] == 0x22);
     }
 
     printf(failures == 0 ? "ALL TESTS PASSED\n" : "%d FAILURES\n", failures);
