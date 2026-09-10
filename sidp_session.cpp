@@ -952,6 +952,26 @@ namespace sidp
         emit_pending_stopped();
     }
 
+    bool sidp_session::prepare_reset(opcode_t opcode, std::uint32_t request_id) noexcept
+    {
+        if (state != TARGET_HALTED) {
+            stop_detect_t stop{};
+            const esp_err_t result = backend.halt(HALT_TIMEOUT_MS, stop);
+            if (result != ESP_OK || !stop.halted) {
+                send_backend_failure(opcode, request_id,
+                                     result == ESP_OK ? ESP_ERR_TIMEOUT : result, STATUS_TIMEOUT);
+                return false;
+            }
+            enter_halted(stop);
+        }
+        if (!rollback_run_config()) {
+            send_response(opcode, request_id, STATUS_SWD_ERROR);
+            enter_lost(TARGET_LOST_SWD_FAULT);
+            return false;
+        }
+        return true;
+    }
+
     void sidp_session::op_reset_halt(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept
     {
         if (payload.size() != sizeof(reset_request_t)) {
@@ -971,16 +991,15 @@ namespace sidp
             return;
         }
 
-        // Restore patches before reset so no BKPT survives it (§10.1 RESET_HALT).
-        if (!sw_bp_restore_all()) {
-            send_response(OP_RESET_HALT, request_id, STATUS_SWD_ERROR);
+        if (!prepare_reset(OP_RESET_HALT, request_id)) {
             return;
         }
 
         stop_detect_t stop{};
         const esp_err_t result = backend.reset(kind, true, stop);
         if (result != ESP_OK) {
-            send_backend_failure(OP_RESET_HALT, request_id, result, STATUS_TIMEOUT);
+            send_response(OP_RESET_HALT, request_id, result == ESP_ERR_TIMEOUT ? STATUS_TIMEOUT : STATUS_SWD_ERROR);
+            enter_lost(result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT);
             return;
         }
 
@@ -1013,14 +1032,14 @@ namespace sidp
             return;
         }
 
-        if (!sw_bp_restore_all()) {
-            send_response(OP_RESET_RUN, request_id, STATUS_SWD_ERROR);
+        if (!prepare_reset(OP_RESET_RUN, request_id)) {
             return;
         }
         stop_detect_t unused{};
         const esp_err_t result = backend.reset(kind, false, unused);
         if (result != ESP_OK) {
-            send_backend_failure(OP_RESET_RUN, request_id, result, STATUS_TIMEOUT);
+            send_response(OP_RESET_RUN, request_id, result == ESP_ERR_TIMEOUT ? STATUS_TIMEOUT : STATUS_SWD_ERROR);
+            enter_lost(result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT);
             return;
         }
 

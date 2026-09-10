@@ -163,6 +163,7 @@ namespace sidp
         void op_write_registers(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept;
         void op_run(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept;
         void op_halt(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept;
+        [[nodiscard]] bool prepare_reset(opcode_t opcode, std::uint32_t request_id) noexcept;
         void op_reset_halt(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept;
         void op_reset_run(std::uint32_t request_id, std::span<const std::uint8_t> payload) noexcept;
 
