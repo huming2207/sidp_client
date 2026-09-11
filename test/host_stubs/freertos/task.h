@@ -8,5 +8,13 @@ inline BaseType_t xTaskCreate(void (*)(void *), const char *, unsigned, void *, 
     *out = reinterpret_cast<void *>(1);
     return pdPASS;
 }
+// Mirrors freertos/idf_additions.h: xTaskCreateWithCaps(). On the host the memory
+// capability is ignored and no task is started, matching the xTaskCreate stub.
+inline BaseType_t xTaskCreateWithCaps(void (*fn)(void *), const char *name, std::uint32_t stack, void *arg,
+                                      UBaseType_t prio, TaskHandle_t *out, UBaseType_t /* uxMemoryCaps */) {
+    return xTaskCreate(fn, name, stack, arg, prio, out);
+}
+// Mirrors freertos/idf_additions.h: vTaskDeleteWithCaps().
+inline void vTaskDeleteWithCaps(TaskHandle_t) {}
 inline void xTaskNotifyGive(TaskHandle_t) {}
 inline unsigned ulTaskNotifyTake(int, TickType_t ticks) { vTaskDelay(ticks); return 0; }

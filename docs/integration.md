@@ -147,7 +147,15 @@ the per-request path.
   released only outside flash operations, and a caller must not hold it across a
   flash write/erase.
 - Transport queues, staging buffers and TX tasks are allocated once in the
-  transport `init()` and live for the process lifetime, by design.
+  transport `init()` and live for the process lifetime, by design. The TX task
+  stack uses `xTaskCreateWithCaps(MALLOC_CAP_SPIRAM)` (the TCB always stays in
+  internal RAM). That is safe here because `sdkconfig.defaults` sets
+  `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`, which keeps the cache enabled during SPI1
+  flash operations, and because the TX task only performs USB/WebSocket wire I/O.
+  A PSRAM-stack task must never itself call `esp_flash_*`, NVS or OTA (route
+  those through `esp_flash_dispatcher`) and must not call deep/light sleep. A
+  task created WithCaps must be deleted with `vTaskDeleteWithCaps`; these
+  process-lifetime tasks are never deleted.
 - STL use is limited to non-allocating facilities (`std::span`, `std::array`,
   `std::atomic`, `<cstdint>`/`<cstddef>`, `std::numeric_limits`, `std::endian`);
   no runtime containers, strings, `std::function` or exceptions are used.

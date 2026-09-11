@@ -251,8 +251,19 @@ namespace sidp
     esp_err_t packet_queue_transport::spawn_tx_task(const char *name) noexcept
     {
         if (tx_ring == nullptr || tx_task_handle != nullptr) return ESP_ERR_INVALID_STATE;
-        return xTaskCreate(tx_task_trampoline, name, TX_TASK_STACK_SIZE, this, TX_TASK_PRIORITY,
-                           &tx_task_handle) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+        // The TX task stack is placed in PSRAM with xTaskCreateWithCaps(); the TCB
+        // itself always stays in internal RAM. This is safe here because:
+        //  - CONFIG_SPIRAM_XIP_FROM_PSRAM is enabled, so the cache is not
+        //    disabled during SPI1 flash operations and PSRAM stays accessible;
+        //  - the TX task only performs USB/WebSocket wire I/O and never issues a
+        //    flash operation itself (a PSRAM-stack task that calls esp_flash_*,
+        //    NVS or OTA would fault; route those through esp_flash_dispatcher).
+        // A task created WithCaps must be deleted with vTaskDeleteWithCaps();
+        // this task is process-lifetime and is never deleted.
+        return xTaskCreateWithCaps(tx_task_trampoline, name, TX_TASK_STACK_SIZE, this, TX_TASK_PRIORITY,
+                                   &tx_task_handle, MALLOC_CAP_SPIRAM) == pdPASS
+                   ? ESP_OK
+                   : ESP_ERR_NO_MEM;
     }
 
     void packet_queue_transport::tx_task_trampoline(void *arg) noexcept
