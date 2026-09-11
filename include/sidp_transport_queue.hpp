@@ -90,13 +90,13 @@ namespace sidp
         void tx_task_loop() noexcept;
 
         /**
-         * @brief RAII guard over the statically allocated queue mutex.
+         * @brief RAII guard over the queue mutex.
          *
-         * The mutex uses caller-provided storage (StaticSemaphore_t) so it never
-         * allocates on the heap; on ESP-IDF a std::mutex would lazily malloc its
-         * pthread control block on first lock. The handle is null before
-         * create_queues() runs, in which case there is no shared state to protect
-         * yet and the guard is a no-op.
+         * The mutex object is allocated from PSRAM by create_queues() via
+         * xSemaphoreCreateMutexWithCaps() and must be released with
+         * vSemaphoreDeleteWithCaps(). The handle is null before create_queues()
+         * runs (and after destroy_queues()), in which case there is no shared
+         * state to protect yet and the guard is a no-op.
          */
         class queue_guard final
         {
@@ -123,7 +123,6 @@ namespace sidp
         };
 
         SemaphoreHandle_t queue_mutex = nullptr;
-        StaticSemaphore_t queue_mutex_storage{};
         RingbufHandle_t ring_buffer = nullptr;
         RingbufHandle_t tx_ring = nullptr;
         RingbufHandle_t log_ring = nullptr;

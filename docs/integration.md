@@ -138,10 +138,14 @@ the per-request path.
 - `sidp_session::init()` allocates its four PSRAM buffers once and
   `release_storage()` (destructor) frees them with the matching
   `heap_caps_free`. After `init()`, handling requests performs no allocation.
-- The queue mutex uses `StaticSemaphore_t` storage created in `create_queues()`
-  instead of `std::mutex`, because ESP-IDF's `std::mutex` lazily `malloc`s a
-  pthread control block on first lock. `packet_queue_transport::queue_guard`
-  takes/gives that static semaphore.
+- The queue mutex is created once in `create_queues()` with the ESP-IDF
+  capability-aware API `xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM)` and
+  released with `vSemaphoreDeleteWithCaps()` (the required pairing), instead of
+  `std::mutex`, which lazily `malloc`s a pthread control block on first lock.
+  `packet_queue_transport::queue_guard` takes/gives it. Note that PSRAM is
+  inaccessible while the flash cache is disabled; the lock is therefore taken and
+  released only outside flash operations, and a caller must not hold it across a
+  flash write/erase.
 - Transport queues, staging buffers and TX tasks are allocated once in the
   transport `init()` and live for the process lifetime, by design.
 - STL use is limited to non-allocating facilities (`std::span`, `std::array`,

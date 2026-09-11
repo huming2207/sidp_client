@@ -103,11 +103,14 @@ namespace sidp
 
     esp_err_t packet_queue_transport::create_queues() noexcept
     {
-        // The queue mutex uses caller-provided storage, so it never allocates.
-        // It must exist before any queue or callback can be published.
+        // The mutex is taken/given on every RX and TX operation, so create it
+        // once here with explicit memory caps (PSRAM) and release it in
+        // destroy_queues() with the matching vSemaphoreDeleteWithCaps().
+        // A mutex created WithCaps must only be deleted WithCaps.
         if (queue_mutex == nullptr) {
-            queue_mutex = xSemaphoreCreateMutexStatic(&queue_mutex_storage);
+            queue_mutex = xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM);
             if (queue_mutex == nullptr) {
+                ESP_LOGE(TAG, "create_queues: queue mutex allocation failed");
                 return ESP_ERR_NO_MEM;
             }
         }
@@ -128,8 +131,10 @@ namespace sidp
             if (*ring != nullptr) vRingbufferDeleteWithCaps(*ring);
             *ring = nullptr;
         }
-        // The static mutex storage stays owned by this object; it is never
-        // heap-allocated, so there is nothing to release here.
+        if (queue_mutex != nullptr) {
+            vSemaphoreDeleteWithCaps(queue_mutex);
+            queue_mutex = nullptr;
+        }
     }
 
     void packet_queue_transport::deliver_packet(const std::uint8_t *data, std::size_t size, std::uint32_t received_epoch) noexcept
