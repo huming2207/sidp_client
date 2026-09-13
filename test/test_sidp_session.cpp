@@ -29,6 +29,7 @@ struct mock_target_t {
     bool halted = false;
     bool attach_ok = true;
     bool detach_ok = true;
+    bool malformed_map = false;
     bool fail_attach = false;
     bool fault_on_next = false; // next op returns FAULT
     bool halt_will_timeout = false;
@@ -50,6 +51,7 @@ struct mock_target_t {
 
     // Observability
     int halt_calls = 0;
+    int detach_calls = 0;
     int resume_calls = 0;
     int reset_calls = 0;
     int read_mem_calls = 0;
@@ -103,12 +105,13 @@ public:
         region_storage[0] = memory_region_t{target_.region_base, mock_target_t::RAM_SIZE, MEMORY_RAM,
                                             target_.ram_flags, {0, 0}};
         info.memory_regions = {reinterpret_cast<const std::uint8_t *>(region_storage.data()),
-                               region_storage.size() * sizeof(memory_region_t)};
+                               region_storage.size() * sizeof(memory_region_t) - (target_.malformed_map ? 1 : 0)};
         return ESP_OK;
     }
 
     esp_err_t detach(detach_action_t action) override
     {
+        ++target_.detach_calls;
         target_.last_detach_action = action;
         return target_.detach_ok ? ESP_OK : ESP_FAIL;
     }
@@ -488,6 +491,70 @@ static std::vector<std::uint8_t> run_payload(std::uint32_t stop_id, run_action_t
 
 int main()
 {
+    // Failed attach validation must retain ownership until cleanup succeeds.
+    for (bool halt_fails : {false, true}) {
+        tx_frames.clear();
+        mock_target_t target;
+        target.malformed_map = true;
+        target.detach_ok = false;
+        target.halt_will_timeout = halt_fails;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+        attach_request_t req{};
+        req.halt_after_attach = 1;
+        session.handle_request(make_request(OP_ATTACH, 1, &req, sizeof(req)));
+        CHECK(tx_frames.size() == 1);
+        CHECK(response_status(0) == STATUS_ERROR);
+        CHECK(session.needs_disconnect());
+        CHECK(session.get_state() == TARGET_LOST);
+        CHECK(target.halt_calls == 1);
+        CHECK(target.detach_calls == (halt_fails ? 0 : 1));
+        CHECK(!session.handle_disconnect());
+        CHECK(target.halt_calls == 2);
+        CHECK(target.detach_calls == (halt_fails ? 0 : 2));
+
+        // No further requests on this connection may access the target.
+        tx_frames.clear();
+        session.handle_request(make_request(OP_ATTACH, 2, &req, sizeof(req)));
+        CHECK(tx_frames.empty());
+        CHECK(target.halt_calls == 2);
+        target.halt_will_timeout = false;
+        target.detach_ok = true;
+        CHECK(session.handle_disconnect());
+        CHECK(target.halted);
+        CHECK(target.last_detach_action == DETACH_KEEP_HALTED);
+        CHECK(target.detach_calls == (halt_fails ? 1 : 3));
+        CHECK(session.get_state() == TARGET_DETACHED);
+        CHECK(session.needs_disconnect());
+        const int calls = target.detach_calls;
+        CHECK(session.handle_disconnect());
+        CHECK(target.detach_calls == calls);
+    }
+
+    // Physical comparator counts do not imply an implemented capability.
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        target.caps_remove = static_cast<std::uint32_t>(CAP_HARDWARE_BP | CAP_WATCHPOINT);
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        const auto *resp = reinterpret_cast<const attach_response_t *>(parse_frame(0).payload);
+        CHECK(resp->hardware_breakpoints == 0);
+        CHECK(resp->hardware_watchpoints == 0);
+        tx_frames.clear();
+        const auto payload = run_payload(session.get_stop_id(), RUN_TO_ADDRESS, {}, {},
+                                         mock_target_t::RAM_BASE + 0x100);
+        session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+        CHECK(tx_frames.size() == 1);
+        CHECK(response_status(0) == STATUS_NO_BREAKPOINT_SLOT);
+        CHECK(target.resume_calls == 0);
+        CHECK(target.applied_hw_bp_addresses.empty());
+        CHECK(session.get_state() == TARGET_HALTED);
+        CHECK(session.handle_disconnect());
+    }
+
     // ---- Test 1: ATTACH from DETACHED, halt_after_attach -> HALTED + STOPPED ----
     {
         tx_frames.clear();

@@ -316,6 +316,8 @@ namespace sidp
             ESP_LOGW(TAG, "attach: CAP_WATCHPOINT without slots; stripping");
             caps &= ~static_cast<std::uint32_t>(CAP_WATCHPOINT);
         }
+        if ((caps & static_cast<std::uint32_t>(CAP_HARDWARE_BP)) == 0) hw_bp = 0;
+        if ((caps & static_cast<std::uint32_t>(CAP_WATCHPOINT)) == 0) hw_wp = 0;
         // Cortex-M software breakpoints are resumed with an internal single step
         // (section 10.4), so advertising CAP_SOFTWARE_BP without CAP_SINGLE_STEP
         // would promise step-over the backend cannot perform.
@@ -400,20 +402,15 @@ namespace sidp
         region_count = 0;
         if (info.memory_regions.size() % sizeof(memory_region_t) != 0 ||
             info.memory_regions.size() / sizeof(memory_region_t) > MAX_MEMORY_REGIONS) {
-            (void)backend.detach(DETACH_KEEP_HALTED);
-            attached = false;
             send_response(OP_ATTACH, request_id, STATUS_ERROR);
+            // End this connection and retain ownership if halt/detach fails.
+            // The owner retries handle_disconnect() before reusing the target.
+            (void)handle_disconnect();
             return;
         }
         const std::size_t source_regions = info.memory_regions.size() / sizeof(memory_region_t);
         for (std::size_t index = 0; index < source_regions; ++index) {
             const auto *region = reinterpret_cast<const memory_region_t *>(info.memory_regions.data() + index * sizeof(memory_region_t));
-            if (region_count == MAX_MEMORY_REGIONS) {
-                (void)backend.detach(DETACH_KEEP_HALTED);
-                attached = false;
-                send_response(OP_ATTACH, request_id, STATUS_ERROR);
-                return;
-            }
             regions[region_count++] = *region;
         }
 
@@ -422,9 +419,8 @@ namespace sidp
         auto *resp = reinterpret_cast<attach_response_t *>(
             begin_frame(KIND_RESPONSE, OP_ATTACH, request_id, sizeof(attach_response_t) + regions_size));
         if (resp == nullptr) {
-            (void)backend.detach(DETACH_KEEP_HALTED);
-            attached = false;
             send_response(OP_ATTACH, request_id, STATUS_ERROR);
+            (void)handle_disconnect();
             return;
         }
         resp->status = STATUS_OK;
@@ -952,6 +948,10 @@ namespace sidp
         // usable slot at all is "no available slot", so the wire contract
         // answer is NO_BREAKPOINT_SLOT in both cases.
         if (req.action == RUN_TO_ADDRESS) {
+            if (!has_capability(CAP_HARDWARE_BP)) {
+                send_response(OP_RUN, request_id, STATUS_NO_BREAKPOINT_SLOT);
+                return;
+            }
             bool reuses_requested = false;
             for (std::size_t index = 0; index < requested_hw_count; ++index) {
                 if (hw_entries[index].address == req.run_to_address) {

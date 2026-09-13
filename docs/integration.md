@@ -36,6 +36,10 @@ never call SWD. Programming and debugging must hold exclusive target ownership.
 
 `begin_session()` and cleanup belong to the owner task, not transport callbacks.
 The destructor releases storage; it is not a substitute for successful cleanup.
+If backend attach succeeds but its memory map or response cannot be accepted,
+the session ends the connection and attempts halt/detach cleanup. Failed cleanup
+retains target ownership and must be retried through `handle_disconnect()` just
+like a physical disconnect; an ATTACH error does not prove the target was released.
 Initial traffic sent before acceptance may be discarded. The peer should allow
 for device readiness when connecting and must not replay an ambiguous operation.
 
@@ -101,7 +105,8 @@ capability or resource limit it cannot serve:
 - `CAP_MEMORY_VECTOR`, the UART/RTT log-stream bits and the reserved ESP32
   GDB-Stub bits have no session handler and are stripped from the response.
 - `hardware_breakpoints`/`hardware_watchpoints` are clamped to the session's own
-  comparator tables, and a feature bit left with zero slots is dropped.
+  comparator tables, and a feature bit left with zero slots is dropped. Counts
+  are zeroed when the corresponding capability is absent.
 - `CAP_RESET_HALT`/`CAP_RESET_RUN` without `CAP_RESET_SYSTEM` or
   `CAP_RESET_NRST` are dropped.
 - `max_memory_transfer == 0` becomes the protocol default 4096, and anything
@@ -114,7 +119,7 @@ section 10 treats "no capability or no slots" as the same condition), and
 hardware breakpoint/watchpoint counts are bounded by the advertised slot count.
 `RUN_SINGLE_STEP` without `CAP_SINGLE_STEP` returns `UNSUPPORTED` because that
 action cannot be represented at all. `RUN_TO_ADDRESS` returns
-`NO_BREAKPOINT_SLOT` whenever there is no reusable or free hardware comparator,
+`NO_BREAKPOINT_SLOT` when `CAP_HARDWARE_BP` is absent or there is no reusable or free hardware comparator,
 including a backend with zero hardware-breakpoint slots (protocol section 10.1
 treats this as "no available slot"). Memory reads/writes are bounded by
 `max_memory_transfer`, which is a limit on wire requests only; internal
