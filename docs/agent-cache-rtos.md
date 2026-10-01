@@ -52,6 +52,22 @@ StopCache {
 
 Soul Agent 绝不能用旧 `stop_id` 的数据回答新的 GDB 会话。
 
+### 2.1 缓存成立的前提和边界
+
+内存缓存只在目标HALTED时存在。它成立的前提是：CPU halt后，只由CPU写入的内存（栈、全局变量、heap、RTOS TCB/链表）不会再变化，同一 `stop_id` 内重复读取得到相同字节。GDB的backtrace、局部变量和RTOS任务列表绝大部分读取都落在这类内存上。
+
+Cortex-M debug halt只停止内核，不停止DMA控制器。以下来源在halt期间仍可修改内存，缓存会把它们“冻结”成第一次读取时的值：
+
+- DMA（例如UART RX DMA在halt期间继续填充buffer）。
+- 其他bus master：第二个内核、带独立DMA的Ethernet/USB控制器等。
+- MMIO：按第4.3节始终不缓存。
+
+这类内存即使不缓存，读回的值也只是读取瞬间的快照；缓存的问题是把“读取后几微秒即过时”延长为“整个halt期间都过时”。因此缓存定位为**突发读取合并器（burst coalescer）**，而不是目标内存的长期镜像：
+
+- **短TTL**：一次 `bt` 或IDE刷新变量窗口会在几毫秒内产生几十个小读取，缓存的收益主要来自这一个突发内。每个缓存block（包括STOPPED栈快照中的内存部分）除受 `stop_id` 约束外，还设置较短的有效期（建议默认0.5-1秒，可配置）；同一halt内超过TTL的block重新经SIDP读取。寄存器不受TTL影响，halt期间内核寄存器不会变化。
+- **写前新鲜读取**：GDB对bitfield或sub-word字段赋值时会读取所在word、修改后整体写回（read-modify-write）。如果这次读取命中陈旧缓存，写回可能覆盖DMA在此期间修改过的字节——这是缓存唯一可能导致目标数据被破坏而不只是显示错误的路径。Soul Agent在处理落在某block内的WRITE_MEMORY之前，若该block的读取时间超过很短的阈值（建议几毫秒），应先经SIDP重新读取该区间，再基于新数据完成写入；写入本身始终直达目标。写操作很少，这只增加一次RTT。
+- **运行态不缓存**：带 `SIDP_MEM_ACCESS_ALLOW_RUNNING` 的访问始终直达目标，结果不进入缓存。
+
 ## 3. STOPPED 时的主动数据
 
 Soul Injector 的 STOPPED Event 默认包含：
@@ -85,6 +101,13 @@ Agent读取：address=0x20000100, length=256
 
 建议初始 block size 为 256 字节。连续命中时可扩大为512字节；不建议无条件扩大到4KiB，因为500kHz SWD上的本地读取时间也不可忽略。
 
+预读是否值得取决于链路RTT与SWD吞吐的比值，Soul Agent应根据实测值决定，而不是固定开启：
+
+- **远程链路（例如200ms RTT）**：为4字节请求读取256字节几乎总是划算，额外SWD时间远小于一次RTT。
+- **本地USB高速（亚毫秒RTT）**：预读可能反而变慢。500kHz SWD读取256字节约需6ms，而GDB实际只需要的4字节远低于1ms；8MHz时约0.4ms，大致持平。
+
+因此Soul Agent在会话中测量请求RTT和每字节读取耗时，按两者估算预读收益：RTT足够小时关闭预读（block size退化为请求长度），RTT较大时才启用并调节block size。本地USB场景的主要加速来自STOPPED快照和RUN批量下发断点，而不是RAM预读。
+
 ### 4.2 Flash
 
 - ELF 中已有的 code/rodata 应由 GDB 或 Soul Agent 本地读取，不经过 SIDP。
@@ -102,7 +125,16 @@ Agent读取：address=0x20000100, length=256
 
 ### 4.4 DMA 区域
 
-即使 CPU halt，DMA 也可能修改 RAM。Soul Agent 允许 target configuration 将特定 RAM region 标记为 volatile，不对其做自动缓存。
+即使 CPU halt，DMA 也可能修改 RAM（见第2.1节）。Soul Agent 允许 target configuration 将特定 RAM region 标记为 volatile，不对其做自动缓存。
+
+仅靠target configuration的region标记不够：DMA buffer通常分散在普通SRAM的 `.bss` 中，与普通变量相邻，除非固件把它们放进独立section（STM32H7等较常见，其他平台少见），memory map层面无法区分。Soul Agent应合并以下来源得到volatile范围，任一来源命中即按volatile处理（精确读取、不缓存、不预读，预读block也不得跨入该范围）：
+
+1. Attach response中带 `SIDP_MEM_VOLATILE` 的region（来自target YAML）。
+2. ELF section：Soul Agent持有ELF时，按名称规则自动标记，例如 `.dma*`、`.noncacheable`、`RAM_D2` 等；规则可由用户配置。
+3. 用户命令：例如 `monitor volatile add <addr> <len>` / `monitor volatile clear`，用于用户已知的个别buffer。
+4. GDB memory region属性：GDB端对某region设置 `nocache` 时，Soul Agent同样不缓存该范围。
+
+另外提供逃生开关 `monitor cache off|on`，以及按region关闭缓存的方式，供用户直接调试DMA时使用。即使上述标记有遗漏，第2.1节的短TTL和写前新鲜读取仍限制了陈旧数据的影响范围。
 
 ## 5. 缓存命中决策
 
@@ -114,15 +146,17 @@ GDB READ_MEMORY
        |是
        v
 是否MMIO/volatile？ --是----> SIDP精确读取，不缓存
-       |否
+       |否                    （volatile来源见4.4；cache off时同样走此路径）
        v
-当前stop_id缓存是否完全覆盖？
+当前stop_id缓存是否完全覆盖，且block未超过TTL？
        |                    |
       是                    否
        |                    |
        v                    v
-本地回答             对齐扩大读取 -> 缓存 -> 回答
+本地回答             按实测RTT决定是否对齐扩大读取 -> 缓存 -> 回答
 ```
+
+WRITE_MEMORY不走上图：先按第2.1节对相交且超过写前阈值的block做新鲜读取，然后写入目标，再更新或失效相交的缓存block。
 
 ## 6. 断点管理
 
@@ -229,7 +263,7 @@ Soul Agent 至少需处理：
 
 - STOPPED 到达 Soul Agent 后，GDB的 `?` 和 `g` 不产生新 SIDP request。
 - 初始backtrace需要的栈数据尽量命中 STOPPED 快照。
-- 同一地址block的重复内存读取不产生新 SIDP request。
+- 同一地址block在TTL内的重复内存读取不产生新 SIDP request（volatile范围除外，见4.4）。
 - 多个GDB断点仅在 RUN 时产生一个 SIDP request。
 - 无FPU目标的初始停止快照尽量保持在1KiB以内；带FPU目标允许约1.2KiB，不因“可能有用”而预读大块RAM。
 
