@@ -499,9 +499,24 @@ namespace sidp
                 send_backend_failure(OP_DETACH, request_id, halt_result, STATUS_TIMEOUT);
                 return;
             }
+            // A breakpoint may have halted the target before the next poll.
+            // Remember its logical PC before restoring and discarding the shadow.
+            if (!stop.comparator_match && (stop.dfsr & (1u << 1)) != 0) {
+                if (const auto *bp = sw_bp_find_by_halt_pc(stop.pc)) {
+                    sw_step_over_pending = true;
+                    sw_step_over_address = bp->address;
+                }
+            }
         }
 
         // Cleanup failure keeps the session attached (section 10.2).
+        // Both final actions must leave PC at the original instruction, not
+        // past its BKPT patch. Keep the pending address until detach succeeds
+        // so a failed cleanup can retry without losing the logical PC.
+        if (sw_step_over_pending && !write_current_pc(static_cast<std::uint32_t>(sw_step_over_address))) {
+            send_response(OP_DETACH, request_id, STATUS_SWD_ERROR);
+            return;
+        }
         if (!sw_bp_restore_all()) {
             send_response(OP_DETACH, request_id, STATUS_SWD_ERROR);
             return;
@@ -1022,8 +1037,9 @@ namespace sidp
         target_lost_reason_t step_lost_reason = TARGET_LOST_SWD_FAULT;
         const step_over_t step = execute_step_over(req.action, step_stop, step_lost_reason);
         if (step == step_over_t::FAILED || step == step_over_t::FAILED_LOST) {
-            // FAILED_LOST means the step may still be executing. Cleanup must
-            // wait for handle_disconnect() to establish halt first.
+            // FAILED_LOST means execution or the post-step patch state cannot
+            // safely be retried. Preserve the shadow for handle_disconnect(),
+            // which confirms halt before attempting cleanup.
             const bool rolled_back = step == step_over_t::FAILED_LOST || rollback_run_config();
             if (!rolled_back && step == step_over_t::FAILED) {
                 send_response(OP_RUN, request_id, STATUS_SWD_ERROR);
@@ -1071,9 +1087,6 @@ namespace sidp
             enter_lost(poll_result == ESP_ERR_TIMEOUT ? TARGET_LOST_TIMEOUT : TARGET_LOST_SWD_FAULT);
         } else if (stop.halted) {
             enter_halted(stop);
-            if (req.action == RUN_SINGLE_STEP) {
-                pending_reason = STOP_SINGLE_STEP;
-            }
             emit_pending_stopped();
         }
     }
@@ -1545,13 +1558,17 @@ namespace sidp
             return step_over_t::FAILED_LOST;
         }
 
-        // Keep the breakpoint armed for the resumed run; a failed re-patch
-        // must not silently disarm the breakpoint.
-        if (bp != nullptr && !sw_bp_install_one(*bp)) {
-            return step_over_t::FAILED;
-        }
+        // The instruction has executed. Never retain a pending rewind after
+        // this point, even if re-arming its breakpoint fails.
         sw_step_over_pending = false;
         sw_step_over_address = 0;
+
+        // A failed re-patch leaves the old stop snapshot stale and the patch
+        // uncertain. End the session and retain the shadow for disconnect
+        // cleanup instead of allowing RUN to replay the completed instruction.
+        if (bp != nullptr && !sw_bp_install_one(*bp)) {
+            return step_over_t::FAILED_LOST;
+        }
 
         // A clean step only sets the step/halt/external bits; anything else
         // (fault, vector catch, watchpoint, another breakpoint) must surface.

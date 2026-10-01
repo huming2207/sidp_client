@@ -113,6 +113,7 @@ public:
     {
         ++target_.detach_calls;
         target_.last_detach_action = action;
+        detached_pc = last_pc;
         return target_.detach_ok ? ESP_OK : ESP_FAIL;
     }
 
@@ -188,7 +189,7 @@ public:
             target_.running = step_hangs;
             step_pc = step_pc + step_advance;
             last_pc = step_pc;
-            last_dfsr = step_clean ? 0x20 /* HALT_STEP */ : step_fault_dfsr;
+            last_dfsr = step_clean ? 0x1 /* DFSR_HALTED */ : step_fault_dfsr;
             last_comparator_match = false;
         } else {
             target_.halted = false;
@@ -198,6 +199,9 @@ public:
     }
 
     bool stepping = false;
+    bool fail_repatch_after_step = false;
+    bool fail_pc_write = false;
+    std::uint32_t detached_pc = 0;
     bool step_hangs = false;
     bool step_fault_flag = false;
     bool step_watchpoint_flag = false;
@@ -264,6 +268,7 @@ public:
     esp_err_t write_regs(const std::uint8_t *data, std::size_t size) override
     {
         ++target_.write_regs_calls;
+        if (fail_pc_write) return ESP_ERR_TIMEOUT;
         if (fault_next()) {
             return ESP_FAIL;
         }
@@ -314,6 +319,7 @@ public:
             return ESP_ERR_INVALID_ARG;
         }
         std::memcpy(dst, data, size);
+        if (patch && stepping && std::exchange(fail_repatch_after_step, false)) return ESP_ERR_TIMEOUT;
         if (patch && std::exchange(target_.fail_after_patch, false)) return ESP_ERR_TIMEOUT;
         return ESP_OK;
     }
@@ -2677,6 +2683,124 @@ int main()
         CHECK(target.writes_while_running == 0);
         CHECK(session.handle_disconnect());
         CHECK(target.mem[0x100] == 0x11 && target.mem[0x101] == 0x22);
+    }
+
+    // DETACH preserves the logical PC, including a breakpoint hit not yet polled.
+    for (auto action : {DETACH_RESUME, DETACH_KEEP_HALTED}) {
+        for (bool reported : {false, true}) {
+            tx_frames.clear();
+            mock_target_t target;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            target.mem[0x100] = 0x11; target.mem[0x101] = 0x22;
+            run_patch(session);
+            target.running = false; target.halted = true;
+            backend.last_pc = mock_target_t::RAM_BASE + 0x102;
+            backend.last_dfsr = 2;
+            if (reported) session.handle_poll();
+            tx_frames.clear();
+            detach_request_t req{}; req.action = action;
+            session.handle_request(make_request(OP_DETACH, 3, &req, sizeof(req)));
+            CHECK(tx_frames.size() == 1); // cleanup halt is not a STOPPED event
+            CHECK(response_status(0) == STATUS_OK);
+            CHECK(session.get_state() == TARGET_DETACHED);
+            CHECK(backend.detached_pc == mock_target_t::RAM_BASE + 0x100);
+            CHECK(target.mem[0x100] == 0x11 && target.mem[0x101] == 0x22);
+        }
+    }
+
+    // A failed PC correction must retain ownership; a later DETACH can retry.
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        run_patch(session);
+        target.running = false; target.halted = true;
+        backend.last_pc = mock_target_t::RAM_BASE + 0x102;
+        backend.last_dfsr = 2;
+        session.handle_poll();
+        backend.fail_pc_write = true;
+        tx_frames.clear();
+        detach_request_t req{}; req.action = DETACH_RESUME;
+        session.handle_request(make_request(OP_DETACH, 3, &req, sizeof(req)));
+        CHECK(response_status(0) != STATUS_OK);
+        CHECK(target.detach_calls == 0);
+        CHECK(session.get_state() == TARGET_HALTED);
+        backend.fail_pc_write = false;
+        session.handle_request(make_request(OP_DETACH, 4, &req, sizeof(req)));
+        CHECK(response_status(1) == STATUS_OK);
+        CHECK(backend.detached_pc == mock_target_t::RAM_BASE + 0x100);
+    }
+
+    // Immediate and delayed single-step observations must classify identically.
+    for (bool delayed : {false, true}) {
+        for (auto reason : {STOP_SINGLE_STEP, STOP_FAULT, STOP_WATCHPOINT,
+                            STOP_BREAKPOINT, STOP_VECTOR_CATCH}) {
+            tx_frames.clear();
+            mock_target_t target;
+            mock_backend_t backend(target);
+            sidp_session session(backend, capture_tx);
+            attach_halted(session);
+            backend.step_fault_flag = reason == STOP_FAULT;
+            backend.step_watchpoint_flag = reason == STOP_WATCHPOINT;
+            backend.step_clean = reason != STOP_BREAKPOINT && reason != STOP_VECTOR_CATCH;
+            backend.step_fault_dfsr = reason == STOP_BREAKPOINT ? 2 : 8;
+            backend.step_hangs = delayed;
+            auto payload = run_payload(session.get_stop_id(), RUN_SINGLE_STEP);
+            tx_frames.clear();
+            session.handle_request(make_request(OP_RUN, 2, payload.data(), payload.size()));
+            if (delayed) {
+                CHECK(tx_frames.size() == 1);
+                target.running = false; target.halted = true;
+                session.handle_poll();
+            }
+            CHECK(tx_frames.size() == 2);
+            CHECK(response_status(0) == STATUS_OK);
+            CHECK(frame_header(1)->opcode == EVT_STOPPED);
+            const auto *stop = reinterpret_cast<const stopped_event_t *>(parse_frame(1).payload);
+            CHECK(stop->reason == reason);
+            CHECK(session.handle_disconnect());
+        }
+    }
+
+    // A failed re-patch after execution ends the session: retry cannot rewind PC.
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        attach_halted(session);
+        target.mem[0x100] = 0x11; target.mem[0x101] = 0x22;
+        run_patch(session);
+        target.running = false; target.halted = true;
+        backend.last_pc = mock_target_t::RAM_BASE + 0x102;
+        backend.last_dfsr = 2;
+        session.handle_poll();
+        backend.fail_repatch_after_step = true;
+        tx_frames.clear();
+        run_patch(session);
+        CHECK(session.get_state() == TARGET_LOST);
+        CHECK(tx_frames.size() == 2);
+        CHECK(response_status(0) == STATUS_TARGET_LOST);
+        if (tx_frames.size() > 1) CHECK(frame_header(1)->opcode == EVT_TARGET_LOST);
+        CHECK(backend.last_pc == mock_target_t::RAM_BASE + 0x104);
+        const int resumes = target.resume_calls;
+        const int writes = target.write_regs_calls;
+        tx_frames.clear();
+        run_patch(session);
+        CHECK(response_status(0) == STATUS_TARGET_LOST);
+        CHECK(target.resume_calls == resumes);
+        CHECK(target.write_regs_calls == writes);
+        // Retain the original instruction even if disconnect cleanup must retry.
+        target.fail_restore = true;
+        CHECK(!session.handle_disconnect());
+        target.fail_restore = false;
+        CHECK(session.handle_disconnect());
+        CHECK(target.mem[0x100] == 0x11 && target.mem[0x101] == 0x22);
+        CHECK(backend.detached_pc == mock_target_t::RAM_BASE + 0x104);
     }
 
     printf(failures == 0 ? "ALL TESTS PASSED\n" : "%d FAILURES\n", failures);

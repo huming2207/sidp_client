@@ -261,7 +261,7 @@ namespace sidp
             STOPPED_STEP, ///< The internal step was the user-requested single step.
             STOPPED_REAL, ///< The internal step hit a real stop; must surface it.
             FAILED,       ///< Step-over could not complete; target stays halted.
-            FAILED_LOST,  ///< Target state unknown after an unconsummated step.
+            FAILED_LOST,  ///< Execution or post-step patch state requires terminal cleanup.
         };
         /** @brief Executes the step-over sequence when halted on a sw breakpoint. */
         [[nodiscard]] step_over_t execute_step_over(run_action_t action, stop_detect_t &step_stop,
