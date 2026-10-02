@@ -16,6 +16,11 @@ but require hardware validation.
 - `include/sidp_backend.hpp`: hardware interface; the real SWD adapter is still needed.
 - `sidp_transport*.cpp`: CRC, queued transport, USB CDC/SLIP and WebSocket client.
 - `test/`: host session tests with a mock target.
+- `proto/`: protobuf schema for programming jobs (`job.proto`), nanopb size
+  limits (`job.options`) and the generated `job.pb.c`/`job.pb.h`. Jobs are
+  compiled on the host by `sidp-agent compile`. SIDP frames do not use
+  protobuf.
+- `nanopb/`: vendored nanopb 0.4.9.2 decoder runtime.
 - `docs/`: protocol, architecture, caching, and target-support documentation.
 
 ## Next milestone

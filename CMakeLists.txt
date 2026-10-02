@@ -4,7 +4,10 @@ idf_component_register(
          "sidp_session.cpp"
          "sidp_transport_cdc.cpp"
          "sidp_transport_websocket.cpp"
-    INCLUDE_DIRS "include"
+         "nanopb/pb_common.c"
+         "nanopb/pb_decode.c"
+         "proto/job.pb.c"
+    INCLUDE_DIRS "include" "nanopb" "proto"
     REQUIRES esp_ringbuf esp_tinyusb tinyusb esp_timer esp_websocket_client esp_common log
 )
 

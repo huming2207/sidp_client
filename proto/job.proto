@@ -1,0 +1,140 @@
+// Soul Injector programming job.
+//
+// Compiled on the host by `sidp-agent compile` from target.yaml and the
+// optional pre/post procedure YAML files, then decoded on the device with
+// nanopb. Size limits for the device are in job.options; the host compiler
+// enforces the same limits before encoding.
+syntax = "proto3";
+
+package si.job;
+
+// Bump when the device must refuse jobs it cannot fully honour.
+enum SchemaVersion {
+    SCHEMA_VERSION_UNSPECIFIED = 0;
+    SCHEMA_VERSION_CURRENT = 1;
+}
+
+message MemoryRegion {
+    enum Kind {
+        KIND_UNSPECIFIED = 0;
+        KIND_RAM = 1;
+        KIND_NVM = 2;
+    }
+    Kind kind = 1;
+    uint32 start = 2;
+    uint32 end = 3; // Exclusive.
+}
+
+message FlashAlgorithm {
+    string name = 1;
+    uint32 load_address = 2;
+    // Entry points are absolute addresses (load_address already added).
+    optional uint32 pc_init = 3;
+    optional uint32 pc_uninit = 4;
+    optional uint32 pc_program_page = 5;
+    optional uint32 pc_erase_sector = 6;
+    optional uint32 pc_erase_all = 7;
+    optional uint32 pc_verify = 8;
+    optional uint32 data_section_offset = 9;
+    optional uint32 flash_start = 10;
+    optional uint32 flash_end = 11; // Exclusive.
+    uint32 page_size = 12;
+    optional uint32 erased_byte_value = 13;
+    optional uint32 program_page_timeout_ms = 14;
+    optional uint32 erase_sector_timeout_ms = 15;
+    bytes instructions = 16; // Decoded algorithm blob, not base64.
+}
+
+message CortexM {
+    FlashAlgorithm algorithm = 1;
+}
+
+message Esp32Image {
+    string path = 1; // Device path, e.g. /data/firmware.bin.
+    uint32 offset = 2;
+}
+
+message Esp32 {
+    string chip = 1;
+    optional uint32 flash_size_kb = 2; // Absent: detect from the target.
+    uint32 baud = 3;
+    bool reset_assert_high = 4;
+    bool boot_assert_high = 5;
+    repeated Esp32Image images = 6;
+}
+
+message SelfTest {
+    enum Type {
+        TYPE_SIMPLE = 0;
+        TYPE_EXTEND = 1;
+        TYPE_POWER = 2;
+    }
+    Type type = 1;
+    uint32 addr = 2;
+    string name = 3;
+}
+
+message Target {
+    string variant_name = 1;
+    repeated MemoryRegion memory_map = 2;
+    // Exactly one family is present. Not a oneof: nanopb resets oneof
+    // members on decode, which would drop the algorithm blob callback.
+    CortexM cortex_m = 3;
+    Esp32 esp32 = 4;
+    repeated SelfTest self_tests = 5;
+}
+
+message Empty {
+}
+
+message Read32 {
+    uint32 addr = 1;
+}
+
+message Write32 {
+    uint32 addr = 1;
+    uint32 data = 2;
+}
+
+message ReadModWrite32 {
+    uint32 addr = 1;
+    uint32 mask = 2; // AND mask.
+    uint32 data = 3; // OR data.
+}
+
+message Poll32 {
+    uint32 addr = 1;
+    uint32 mask = 2;
+    uint32 expected = 3;
+    uint32 timeout_ms = 4;
+}
+
+message Delay {
+    uint32 delay_ms = 1;
+}
+
+message Step {
+    bool ignore_error = 1;
+    oneof op {
+        Read32 read32 = 2;
+        Write32 write32 = 3;
+        ReadModWrite32 read_mod_write32 = 4;
+        Poll32 poll32 = 5;
+        Delay delay = 6;
+        Empty swd_reinit = 7;
+        Empty reset_target = 8;
+        Empty halt_target = 9;
+        Empty wait_halt = 10;
+    }
+}
+
+message Procedure {
+    repeated Step steps = 1;
+}
+
+message Job {
+    SchemaVersion schema_version = 1;
+    Target target = 2;
+    Procedure pre_program = 3;
+    Procedure post_program = 4;
+}

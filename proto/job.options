@@ -1,0 +1,11 @@
+# nanopb limits for the device. sidp-agent enforces the same limits.
+si.job.FlashAlgorithm.name          max_size:32
+si.job.FlashAlgorithm.instructions  type:FT_CALLBACK
+si.job.Target.variant_name          max_size:32
+si.job.Target.memory_map            max_count:16
+si.job.Target.self_tests            max_count:16
+si.job.SelfTest.name                max_size:32
+si.job.Esp32.chip                   max_size:24
+si.job.Esp32.images                 max_count:8
+si.job.Esp32Image.path              max_size:64
+si.job.Procedure.steps              max_count:96
