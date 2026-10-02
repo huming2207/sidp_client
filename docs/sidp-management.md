@@ -18,6 +18,7 @@
 | Opcode | 名称 | Request | Response |
 |--------|------|---------|----------|
 | 0x0100 | DEVICE_INFO | 空 | `DeviceInfo` |
+| 0x0101 | SET_TIME | `SetTimeRequest` | 空 |
 | 0x0110 | ASSET_BEGIN | `AssetBeginRequest` | `AssetBeginResponse` |
 | 0x0111 | ASSET_WRITE | offset + 数据 | 空 |
 | 0x0112 | ASSET_COMMIT | 空 | 空 |
@@ -25,6 +26,8 @@
 | 0x0121 | JOB_GET | 空 | `JobStatus` |
 | 0x0122 | JOB_RUN_ONCE | 空 | `JobRunOnceResponse` |
 | 0x0123 | JOB_CANCEL | `JobCancelRequest` | 空 |
+| 0x0130 | LOG_READ | `LogReadRequest` | `LogReadResponse` |
+| 0x0131 | LOG_ACK | `LogAckRequest` | 空 |
 
 ## 3. 状态码
 
@@ -34,6 +37,7 @@
 | `STATUS_INVALID_ARGUMENT` | 参数、文件名、offset、大小或哈希不对，或找不到对应的文件、暂存 job 或镜像。 |
 | `STATUS_ERROR` | 其它失败（文件系统、job 解码或校验失败、空间不足等），详情见设备日志。 |
 | `STATUS_UNSUPPORTED` | 未知 opcode 或调试 opcode。 |
+| `STATUS_LOG_FULL` | 生产日志已满，需先收集（`LOG_READ` + `LOG_ACK`）才能再烧录。 |
 
 ## 4. 文件上传（ASSET_*）
 
@@ -71,3 +75,29 @@
 
 每次烧录开始时设备都会重新比对镜像哈希，镜像在 `JOB_SET` 之后被替换时该次烧录在
 LOAD 阶段失败。`run_id` 和上次结果不跨重启保存。
+
+## 6. 生产日志
+
+设备把每次烧录的结果和每次开机记入生产日志（独立的 `log` 分区，on9ringstore），
+由 host 收集。条目 ID 跨重启递增（开机计数 << 40 | 序号）。
+
+- `DEVICE_INFO` 中的 `log_newest_id` 是最新条目，`log_acked_id` 是已收集到的条目；
+  两者不等时有未收集的条目。
+- `LOG_READ {after_id}`：返回 ID 大于 `after_id` 的条目，从旧到新，一帧放得下多少返回多少；
+  为空表示没有更多。从 `log_acked_id` 开始读。
+  - `type = LOG_ENTRY_RUN`：`record` 为 `RunRecord`（结果、trigger、job 名称和哈希、错误码）。
+  - `type = LOG_ENTRY_BOOT`：`record` 为 `BootRecord`（复位原因）。
+  - `type = LOG_ENTRY_UNKNOWN`：损坏或未知条目，`record` 为空；照常确认。
+- `LOG_ACK {up_to_id}`：确认收集到 `up_to_id`（含），设备之后可以覆盖这些条目。
+  只能向前移动，小于等于已确认值时直接返回 OK；大于最新条目时返回
+  `STATUS_INVALID_ARGUMENT`。Host 应在把条目写入自己的存储之后再确认。
+- `SET_TIME {utc_ms}`：设置本次开机的时钟（每次开机只接受第一次）。
+  条目的 `utc_ms` 由同一次开机的时间设置推算，所以设置之前写入的条目也有时间；
+  那次开机从未设置时间时为 0，此时只有 `uptime_us`。
+
+设备从不覆盖未确认的条目。日志满时（最旧的未确认条目所在的段需要被重用），
+`JOB_RUN_ONCE` 返回 `STATUS_LOG_FULL`，插入目标也不会自动烧录，`DEVICE_INFO.log_full`
+为 true，直到 host 收集并确认。因日志已满而写不进去的那条烧录记录保留在 RAM 中，
+确认后写入；设备在此之前复位会丢失这一条。
+
+后续计划：调试会话中目标崩溃等事件也将记入同一日志，作为新的 `LogEntryType`。

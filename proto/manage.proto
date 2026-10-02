@@ -13,6 +13,14 @@ message DeviceInfo {
     string firmware_version = 2;
     uint32 storage_total_kb = 3;
     uint32 storage_free_kb = 4;
+    uint64 log_newest_id = 5; // Newest production log entry; 0 when empty.
+    uint64 log_acked_id = 6;  // Entries up to this ID have been collected.
+    bool log_full = 7;        // Runs are refused until the log is collected.
+}
+
+// Sets the device clock for this boot; the first request after boot wins.
+message SetTimeRequest {
+    uint64 utc_ms = 1; // Unix time in milliseconds.
 }
 
 // Asset names are bare file names stored under /data on the device.
@@ -90,4 +98,48 @@ message JobRunOnceResponse {
 
 message JobCancelRequest {
     uint32 run_id = 1; // 0 cancels whatever is running.
+}
+
+// ---- Production log ----
+// Log entry IDs increase across reboots: boot counter << 40 | sequence.
+
+enum LogEntryType {
+    LOG_ENTRY_UNKNOWN = 0; // Corrupted or unknown; record is empty.
+    LOG_ENTRY_BOOT = 1;    // record is a BootRecord.
+    LOG_ENTRY_RUN = 2;     // record is a RunRecord.
+}
+
+message BootRecord {
+    uint32 reset_reason = 1; // ESP-IDF esp_reset_reason_t.
+}
+
+message RunRecord {
+    RunResult result = 1;
+    Trigger trigger = 2; // MANUAL: requested over SIDP; AUTO_ON_DETECT: target plugged in.
+    string job_name = 3;
+    bytes job_sha256 = 4;
+    int32 error_code = 5; // ESP-IDF esp_err_t of a failed run; 0 otherwise.
+}
+
+message LogReadRequest {
+    uint64 after_id = 1; // Returns entries with larger IDs, oldest first.
+}
+
+message LogEntry {
+    uint64 id = 1;
+    uint64 uptime_us = 2; // Since the boot the entry was written in.
+    uint64 utc_ms = 3;    // 0 when the clock was not set during that boot.
+    LogEntryType type = 4;
+    bytes record = 5;     // Encoded record message selected by type.
+}
+
+// As many entries as fit in one frame; empty when there are no more.
+message LogReadResponse {
+    repeated LogEntry entries = 1;
+}
+
+// Marks entries up to and including up_to_id as collected, so the device
+// may overwrite them.
+message LogAckRequest {
+    uint64 up_to_id = 1;
 }

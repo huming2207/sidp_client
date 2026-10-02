@@ -9,6 +9,9 @@
 PB_BIND(si_manage_DeviceInfo, si_manage_DeviceInfo, AUTO)
 
 
+PB_BIND(si_manage_SetTimeRequest, si_manage_SetTimeRequest, AUTO)
+
+
 PB_BIND(si_manage_AssetBeginRequest, si_manage_AssetBeginRequest, AUTO)
 
 
@@ -28,6 +31,26 @@ PB_BIND(si_manage_JobRunOnceResponse, si_manage_JobRunOnceResponse, AUTO)
 
 
 PB_BIND(si_manage_JobCancelRequest, si_manage_JobCancelRequest, AUTO)
+
+
+PB_BIND(si_manage_BootRecord, si_manage_BootRecord, AUTO)
+
+
+PB_BIND(si_manage_RunRecord, si_manage_RunRecord, AUTO)
+
+
+PB_BIND(si_manage_LogReadRequest, si_manage_LogReadRequest, AUTO)
+
+
+PB_BIND(si_manage_LogEntry, si_manage_LogEntry, AUTO)
+
+
+PB_BIND(si_manage_LogReadResponse, si_manage_LogReadResponse, AUTO)
+
+
+PB_BIND(si_manage_LogAckRequest, si_manage_LogAckRequest, AUTO)
+
+
 
 
 

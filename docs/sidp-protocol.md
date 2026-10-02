@@ -167,7 +167,7 @@ enum sidp_opcode_t : uint16_t {
 
 `READ_MEMORY_VECTOR` 不是 v1 基础实现的硬要求。支持时通过 Attach response 的 capability bit 宣告。
 
-`0x0100` 及以上是管理服务（设备信息、文件上传、job），见 [sidp-management.md](sidp-management.md)。
+`0x0100` 及以上是管理服务（设备信息、文件上传、job、生产日志），见 [sidp-management.md](sidp-management.md)。
 
 ## 5. 统一状态码
 
@@ -191,6 +191,8 @@ enum sidp_status_t : int32_t {
     SIDP_STATUS_NO_WATCHPOINT_SLOT   = 23,
     SIDP_STATUS_ALIGNMENT_ERROR      = 24,
     SIDP_STATUS_TARGET_MISMATCH      = 25,
+
+    SIDP_STATUS_LOG_FULL             = 30,
 };
 
 typedef struct __attribute__((packed)) {

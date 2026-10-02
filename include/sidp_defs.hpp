@@ -43,6 +43,7 @@ namespace sidp
         // Management service (docs/sidp-management.md). Payloads are
         // protobuf messages from proto/manage.proto, except ASSET_WRITE.
         OP_DEVICE_INFO = 0x0100,
+        OP_SET_TIME = 0x0101,
 
         OP_ASSET_BEGIN = 0x0110,
         OP_ASSET_WRITE = 0x0111,
@@ -52,6 +53,9 @@ namespace sidp
         OP_JOB_GET = 0x0121,
         OP_JOB_RUN_ONCE = 0x0122,
         OP_JOB_CANCEL = 0x0123,
+
+        OP_LOG_READ = 0x0130,
+        OP_LOG_ACK = 0x0131,
     };
 
     /** @brief First opcode of the management service; lower opcodes are debug. */
@@ -76,6 +80,8 @@ namespace sidp
         STATUS_NO_WATCHPOINT_SLOT = 23,
         STATUS_ALIGNMENT_ERROR = 24,
         STATUS_TARGET_MISMATCH = 25,
+
+        STATUS_LOG_FULL = 30, // Management: production log needs collecting before a run
     };
 
     enum architecture_t : std::uint8_t {

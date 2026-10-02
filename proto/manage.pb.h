@@ -41,13 +41,27 @@ typedef enum _si_manage_Stage {
     si_manage_Stage_STAGE_CURRENT_TEST = 9
 } si_manage_Stage;
 
+typedef enum _si_manage_LogEntryType {
+    si_manage_LogEntryType_LOG_ENTRY_UNKNOWN = 0, /* Corrupted or unknown; record is empty. */
+    si_manage_LogEntryType_LOG_ENTRY_BOOT = 1, /* record is a BootRecord. */
+    si_manage_LogEntryType_LOG_ENTRY_RUN = 2 /* record is a RunRecord. */
+} si_manage_LogEntryType;
+
 /* Struct definitions */
 typedef struct _si_manage_DeviceInfo {
     char serial[32];
     char firmware_version[32];
     uint32_t storage_total_kb;
     uint32_t storage_free_kb;
+    uint64_t log_newest_id; /* Newest production log entry; 0 when empty. */
+    uint64_t log_acked_id; /* Entries up to this ID have been collected. */
+    bool log_full; /* Runs are refused until the log is collected. */
 } si_manage_DeviceInfo;
+
+/* Sets the device clock for this boot; the first request after boot wins. */
+typedef struct _si_manage_SetTimeRequest {
+    uint64_t utc_ms; /* Unix time in milliseconds. */
+} si_manage_SetTimeRequest;
 
 /* Asset names are bare file names stored under /data on the device. */
 typedef struct _si_manage_AssetBeginRequest {
@@ -96,6 +110,43 @@ typedef struct _si_manage_JobCancelRequest {
     uint32_t run_id; /* 0 cancels whatever is running. */
 } si_manage_JobCancelRequest;
 
+typedef struct _si_manage_BootRecord {
+    uint32_t reset_reason; /* ESP-IDF esp_reset_reason_t. */
+} si_manage_BootRecord;
+
+typedef struct _si_manage_RunRecord {
+    bool has_result;
+    si_manage_RunResult result;
+    si_manage_Trigger trigger; /* MANUAL: requested over SIDP; AUTO_ON_DETECT: target plugged in. */
+    char job_name[32];
+    pb_byte_t job_sha256[32];
+    int32_t error_code; /* ESP-IDF esp_err_t of a failed run; 0 otherwise. */
+} si_manage_RunRecord;
+
+typedef struct _si_manage_LogReadRequest {
+    uint64_t after_id; /* Returns entries with larger IDs, oldest first. */
+} si_manage_LogReadRequest;
+
+typedef PB_BYTES_ARRAY_T(128) si_manage_LogEntry_record_t;
+typedef struct _si_manage_LogEntry {
+    uint64_t id;
+    uint64_t uptime_us; /* Since the boot the entry was written in. */
+    uint64_t utc_ms; /* 0 when the clock was not set during that boot. */
+    si_manage_LogEntryType type;
+    si_manage_LogEntry_record_t record; /* Encoded record message selected by type. */
+} si_manage_LogEntry;
+
+/* As many entries as fit in one frame; empty when there are no more. */
+typedef struct _si_manage_LogReadResponse {
+    pb_callback_t entries;
+} si_manage_LogReadResponse;
+
+/* Marks entries up to and including up_to_id as collected, so the device
+ may overwrite them. */
+typedef struct _si_manage_LogAckRequest {
+    uint64_t up_to_id;
+} si_manage_LogAckRequest;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -118,6 +169,11 @@ extern "C" {
 #define _si_manage_Stage_MAX si_manage_Stage_STAGE_CURRENT_TEST
 #define _si_manage_Stage_ARRAYSIZE ((si_manage_Stage)(si_manage_Stage_STAGE_CURRENT_TEST+1))
 
+#define _si_manage_LogEntryType_MIN si_manage_LogEntryType_LOG_ENTRY_UNKNOWN
+#define _si_manage_LogEntryType_MAX si_manage_LogEntryType_LOG_ENTRY_RUN
+#define _si_manage_LogEntryType_ARRAYSIZE ((si_manage_LogEntryType)(si_manage_LogEntryType_LOG_ENTRY_RUN+1))
+
+
 
 
 
@@ -132,8 +188,17 @@ extern "C" {
 
 
 
+#define si_manage_RunRecord_trigger_ENUMTYPE si_manage_Trigger
+
+
+#define si_manage_LogEntry_type_ENUMTYPE si_manage_LogEntryType
+
+
+
+
 /* Initializer values for message structs */
-#define si_manage_DeviceInfo_init_default        {"", "", 0, 0}
+#define si_manage_DeviceInfo_init_default        {"", "", 0, 0, 0, 0, 0}
+#define si_manage_SetTimeRequest_init_default    {0}
 #define si_manage_AssetBeginRequest_init_default {"", 0, {0}}
 #define si_manage_AssetBeginResponse_init_default {0, 0}
 #define si_manage_JobSetRequest_init_default     {{0}, _si_manage_Trigger_MIN}
@@ -141,7 +206,14 @@ extern "C" {
 #define si_manage_JobStatus_init_default         {0, "", {0}, _si_manage_Trigger_MIN, _si_manage_RunState_MIN, 0, false, si_manage_RunResult_init_default}
 #define si_manage_JobRunOnceResponse_init_default {0}
 #define si_manage_JobCancelRequest_init_default  {0}
-#define si_manage_DeviceInfo_init_zero           {"", "", 0, 0}
+#define si_manage_BootRecord_init_default        {0}
+#define si_manage_RunRecord_init_default         {false, si_manage_RunResult_init_default, _si_manage_Trigger_MIN, "", {0}, 0}
+#define si_manage_LogReadRequest_init_default    {0}
+#define si_manage_LogEntry_init_default          {0, 0, 0, _si_manage_LogEntryType_MIN, {0, {0}}}
+#define si_manage_LogReadResponse_init_default   {{{NULL}, NULL}}
+#define si_manage_LogAckRequest_init_default     {0}
+#define si_manage_DeviceInfo_init_zero           {"", "", 0, 0, 0, 0, 0}
+#define si_manage_SetTimeRequest_init_zero       {0}
 #define si_manage_AssetBeginRequest_init_zero    {"", 0, {0}}
 #define si_manage_AssetBeginResponse_init_zero   {0, 0}
 #define si_manage_JobSetRequest_init_zero        {{0}, _si_manage_Trigger_MIN}
@@ -149,12 +221,22 @@ extern "C" {
 #define si_manage_JobStatus_init_zero            {0, "", {0}, _si_manage_Trigger_MIN, _si_manage_RunState_MIN, 0, false, si_manage_RunResult_init_zero}
 #define si_manage_JobRunOnceResponse_init_zero   {0}
 #define si_manage_JobCancelRequest_init_zero     {0}
+#define si_manage_BootRecord_init_zero           {0}
+#define si_manage_RunRecord_init_zero            {false, si_manage_RunResult_init_zero, _si_manage_Trigger_MIN, "", {0}, 0}
+#define si_manage_LogReadRequest_init_zero       {0}
+#define si_manage_LogEntry_init_zero             {0, 0, 0, _si_manage_LogEntryType_MIN, {0, {0}}}
+#define si_manage_LogReadResponse_init_zero      {{{NULL}, NULL}}
+#define si_manage_LogAckRequest_init_zero        {0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define si_manage_DeviceInfo_serial_tag          1
 #define si_manage_DeviceInfo_firmware_version_tag 2
 #define si_manage_DeviceInfo_storage_total_kb_tag 3
 #define si_manage_DeviceInfo_storage_free_kb_tag 4
+#define si_manage_DeviceInfo_log_newest_id_tag   5
+#define si_manage_DeviceInfo_log_acked_id_tag    6
+#define si_manage_DeviceInfo_log_full_tag        7
+#define si_manage_SetTimeRequest_utc_ms_tag      1
 #define si_manage_AssetBeginRequest_name_tag     1
 #define si_manage_AssetBeginRequest_size_tag     2
 #define si_manage_AssetBeginRequest_sha256_tag   3
@@ -175,15 +257,37 @@ extern "C" {
 #define si_manage_JobStatus_last_result_tag      7
 #define si_manage_JobRunOnceResponse_run_id_tag  1
 #define si_manage_JobCancelRequest_run_id_tag    1
+#define si_manage_BootRecord_reset_reason_tag    1
+#define si_manage_RunRecord_result_tag           1
+#define si_manage_RunRecord_trigger_tag          2
+#define si_manage_RunRecord_job_name_tag         3
+#define si_manage_RunRecord_job_sha256_tag       4
+#define si_manage_RunRecord_error_code_tag       5
+#define si_manage_LogReadRequest_after_id_tag    1
+#define si_manage_LogEntry_id_tag                1
+#define si_manage_LogEntry_uptime_us_tag         2
+#define si_manage_LogEntry_utc_ms_tag            3
+#define si_manage_LogEntry_type_tag              4
+#define si_manage_LogEntry_record_tag            5
+#define si_manage_LogReadResponse_entries_tag    1
+#define si_manage_LogAckRequest_up_to_id_tag     1
 
 /* Struct field encoding specification for nanopb */
 #define si_manage_DeviceInfo_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, STRING,   serial,            1) \
 X(a, STATIC,   SINGULAR, STRING,   firmware_version,   2) \
 X(a, STATIC,   SINGULAR, UINT32,   storage_total_kb,   3) \
-X(a, STATIC,   SINGULAR, UINT32,   storage_free_kb,   4)
+X(a, STATIC,   SINGULAR, UINT32,   storage_free_kb,   4) \
+X(a, STATIC,   SINGULAR, UINT64,   log_newest_id,     5) \
+X(a, STATIC,   SINGULAR, UINT64,   log_acked_id,      6) \
+X(a, STATIC,   SINGULAR, BOOL,     log_full,          7)
 #define si_manage_DeviceInfo_CALLBACK NULL
 #define si_manage_DeviceInfo_DEFAULT NULL
+
+#define si_manage_SetTimeRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT64,   utc_ms,            1)
+#define si_manage_SetTimeRequest_CALLBACK NULL
+#define si_manage_SetTimeRequest_DEFAULT NULL
 
 #define si_manage_AssetBeginRequest_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, STRING,   name,              1) \
@@ -234,7 +338,48 @@ X(a, STATIC,   SINGULAR, UINT32,   run_id,            1)
 #define si_manage_JobCancelRequest_CALLBACK NULL
 #define si_manage_JobCancelRequest_DEFAULT NULL
 
+#define si_manage_BootRecord_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   reset_reason,      1)
+#define si_manage_BootRecord_CALLBACK NULL
+#define si_manage_BootRecord_DEFAULT NULL
+
+#define si_manage_RunRecord_FIELDLIST(X, a) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  result,            1) \
+X(a, STATIC,   SINGULAR, UENUM,    trigger,           2) \
+X(a, STATIC,   SINGULAR, STRING,   job_name,          3) \
+X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, job_sha256,        4) \
+X(a, STATIC,   SINGULAR, INT32,    error_code,        5)
+#define si_manage_RunRecord_CALLBACK NULL
+#define si_manage_RunRecord_DEFAULT NULL
+#define si_manage_RunRecord_result_MSGTYPE si_manage_RunResult
+
+#define si_manage_LogReadRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT64,   after_id,          1)
+#define si_manage_LogReadRequest_CALLBACK NULL
+#define si_manage_LogReadRequest_DEFAULT NULL
+
+#define si_manage_LogEntry_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT64,   id,                1) \
+X(a, STATIC,   SINGULAR, UINT64,   uptime_us,         2) \
+X(a, STATIC,   SINGULAR, UINT64,   utc_ms,            3) \
+X(a, STATIC,   SINGULAR, UENUM,    type,              4) \
+X(a, STATIC,   SINGULAR, BYTES,    record,            5)
+#define si_manage_LogEntry_CALLBACK NULL
+#define si_manage_LogEntry_DEFAULT NULL
+
+#define si_manage_LogReadResponse_FIELDLIST(X, a) \
+X(a, CALLBACK, REPEATED, MESSAGE,  entries,           1)
+#define si_manage_LogReadResponse_CALLBACK pb_default_field_callback
+#define si_manage_LogReadResponse_DEFAULT NULL
+#define si_manage_LogReadResponse_entries_MSGTYPE si_manage_LogEntry
+
+#define si_manage_LogAckRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT64,   up_to_id,          1)
+#define si_manage_LogAckRequest_CALLBACK NULL
+#define si_manage_LogAckRequest_DEFAULT NULL
+
 extern const pb_msgdesc_t si_manage_DeviceInfo_msg;
+extern const pb_msgdesc_t si_manage_SetTimeRequest_msg;
 extern const pb_msgdesc_t si_manage_AssetBeginRequest_msg;
 extern const pb_msgdesc_t si_manage_AssetBeginResponse_msg;
 extern const pb_msgdesc_t si_manage_JobSetRequest_msg;
@@ -242,9 +387,16 @@ extern const pb_msgdesc_t si_manage_RunResult_msg;
 extern const pb_msgdesc_t si_manage_JobStatus_msg;
 extern const pb_msgdesc_t si_manage_JobRunOnceResponse_msg;
 extern const pb_msgdesc_t si_manage_JobCancelRequest_msg;
+extern const pb_msgdesc_t si_manage_BootRecord_msg;
+extern const pb_msgdesc_t si_manage_RunRecord_msg;
+extern const pb_msgdesc_t si_manage_LogReadRequest_msg;
+extern const pb_msgdesc_t si_manage_LogEntry_msg;
+extern const pb_msgdesc_t si_manage_LogReadResponse_msg;
+extern const pb_msgdesc_t si_manage_LogAckRequest_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define si_manage_DeviceInfo_fields &si_manage_DeviceInfo_msg
+#define si_manage_SetTimeRequest_fields &si_manage_SetTimeRequest_msg
 #define si_manage_AssetBeginRequest_fields &si_manage_AssetBeginRequest_msg
 #define si_manage_AssetBeginResponse_fields &si_manage_AssetBeginResponse_msg
 #define si_manage_JobSetRequest_fields &si_manage_JobSetRequest_msg
@@ -252,17 +404,30 @@ extern const pb_msgdesc_t si_manage_JobCancelRequest_msg;
 #define si_manage_JobStatus_fields &si_manage_JobStatus_msg
 #define si_manage_JobRunOnceResponse_fields &si_manage_JobRunOnceResponse_msg
 #define si_manage_JobCancelRequest_fields &si_manage_JobCancelRequest_msg
+#define si_manage_BootRecord_fields &si_manage_BootRecord_msg
+#define si_manage_RunRecord_fields &si_manage_RunRecord_msg
+#define si_manage_LogReadRequest_fields &si_manage_LogReadRequest_msg
+#define si_manage_LogEntry_fields &si_manage_LogEntry_msg
+#define si_manage_LogReadResponse_fields &si_manage_LogReadResponse_msg
+#define si_manage_LogAckRequest_fields &si_manage_LogAckRequest_msg
 
 /* Maximum encoded size of messages (where known) */
-#define SI_MANAGE_MANAGE_PB_H_MAX_SIZE           si_manage_JobStatus_size
+/* si_manage_LogReadResponse_size depends on runtime parameters */
+#define SI_MANAGE_MANAGE_PB_H_MAX_SIZE           si_manage_LogEntry_size
 #define si_manage_AssetBeginRequest_size         73
 #define si_manage_AssetBeginResponse_size        8
-#define si_manage_DeviceInfo_size                78
+#define si_manage_BootRecord_size                6
+#define si_manage_DeviceInfo_size                102
 #define si_manage_JobCancelRequest_size          6
 #define si_manage_JobRunOnceResponse_size        6
 #define si_manage_JobSetRequest_size             36
 #define si_manage_JobStatus_size                 97
+#define si_manage_LogAckRequest_size             11
+#define si_manage_LogEntry_size                  166
+#define si_manage_LogReadRequest_size            11
+#define si_manage_RunRecord_size                 98
 #define si_manage_RunResult_size                 16
+#define si_manage_SetTimeRequest_size            11
 
 #ifdef __cplusplus
 } /* extern "C" */
