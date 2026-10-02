@@ -21,7 +21,8 @@ but require hardware validation.
   (`*.options`) and the generated nanopb sources. Jobs are compiled on the
   host by `sidp-agent compile`. SIDP frames themselves do not use protobuf.
 - `nanopb/`: vendored nanopb 0.4.9.2 runtime.
-- `docs/sidp-management.md`: management opcodes (device info, asset upload, jobs).
+- `docs/sidp-management.md`: management opcodes (device info, clock, asset
+  upload, jobs, production log).
 - `docs/`: protocol, architecture, caching, and target-support documentation.
 
 ## Next milestone
