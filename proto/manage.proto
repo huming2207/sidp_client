@@ -15,7 +15,7 @@ message DeviceInfo {
     uint32 storage_free_kb = 4;
     uint64 log_newest_id = 5; // Newest production log entry; 0 when empty.
     uint64 log_acked_id = 6;  // Entries up to this ID have been collected.
-    bool log_full = 7;        // Runs are refused until the log is collected.
+    bool log_full = 7;        // Runs are refused: the log needs collecting, or a log write failed (until restart).
 }
 
 // Sets the device clock for this boot; the first request after boot wins.
