@@ -1,0 +1,93 @@
+// Soul Injector management service payloads (SIDP opcodes 0x0100 and up).
+//
+// The SIDP header and response status prefix are unchanged; these messages
+// are the payload after them. ASSET_WRITE is the exception: its payload is
+// sidp::asset_write_request_t followed by raw data. See
+// docs/sidp-management.md.
+syntax = "proto3";
+
+package si.manage;
+
+message DeviceInfo {
+    string serial = 1;
+    string firmware_version = 2;
+    uint32 storage_total_kb = 3;
+    uint32 storage_free_kb = 4;
+}
+
+// Asset names are bare file names stored under /data on the device.
+message AssetBeginRequest {
+    string name = 1;
+    uint32 size = 2;
+    bytes sha256 = 3;
+}
+
+message AssetBeginResponse {
+    // True when the device already holds this exact asset; nothing to upload.
+    bool present = 1;
+    // Next byte to send. Non-zero when an interrupted upload is resumed.
+    uint32 offset = 2;
+}
+
+enum Trigger {
+    TRIGGER_MANUAL = 0;         // Runs only on JOB_RUN_ONCE.
+    TRIGGER_AUTO_ON_DETECT = 1; // Also runs whenever a target is plugged in.
+}
+
+// Activates the job uploaded as asset "job.pb.new". Setting the active
+// job's hash again only updates the trigger.
+message JobSetRequest {
+    bytes sha256 = 1;
+    Trigger trigger = 2;
+}
+
+enum RunState {
+    RUN_STATE_IDLE = 0;
+    RUN_STATE_RUNNING = 1;
+}
+
+enum Outcome {
+    OUTCOME_NONE = 0;
+    OUTCOME_PASS = 1;
+    OUTCOME_FAIL = 2;
+    OUTCOME_CANCELLED = 3;
+}
+
+// Programming stage where a run failed or was cancelled.
+enum Stage {
+    STAGE_NONE = 0;
+    STAGE_LOAD = 1;
+    STAGE_PRE_PROGRAM = 2;
+    STAGE_DETECT = 3;
+    STAGE_ERASE = 4;
+    STAGE_PROGRAM = 5;
+    STAGE_VERIFY = 6;
+    STAGE_SELF_TEST = 7;
+    STAGE_POST_PROGRAM = 8;
+    STAGE_CURRENT_TEST = 9;
+}
+
+message RunResult {
+    uint32 run_id = 1;
+    Outcome outcome = 2;
+    Stage failed_stage = 3;
+    uint32 duration_ms = 4;
+}
+
+message JobStatus {
+    bool has_job = 1;
+    string name = 2;
+    bytes sha256 = 3;
+    Trigger trigger = 4;
+    RunState state = 5;
+    uint32 current_run_id = 6; // Valid while RUNNING.
+    RunResult last_result = 7; // run_id 0: nothing has run since boot.
+}
+
+message JobRunOnceResponse {
+    uint32 run_id = 1;
+}
+
+message JobCancelRequest {
+    uint32 run_id = 1; // 0 cancels whatever is running.
+}

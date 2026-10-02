@@ -47,11 +47,14 @@ message FlashAlgorithm {
 
 message CortexM {
     FlashAlgorithm algorithm = 1;
+    // SHA-256 of /data/firmware.bin; the device refuses any other image.
+    bytes firmware_sha256 = 2;
 }
 
 message Esp32Image {
     string path = 1; // Device path, e.g. /data/firmware.bin.
     uint32 offset = 2;
+    bytes sha256 = 3; // The device refuses any other image at path.
 }
 
 message Esp32 {
@@ -137,4 +140,5 @@ message Job {
     Target target = 2;
     Procedure pre_program = 3;
     Procedure post_program = 4;
+    string name = 5; // Shown by JOB_GET; defaults to the variant name.
 }

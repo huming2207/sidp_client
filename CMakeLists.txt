@@ -6,7 +6,9 @@ idf_component_register(
          "sidp_transport_websocket.cpp"
          "nanopb/pb_common.c"
          "nanopb/pb_decode.c"
+         "nanopb/pb_encode.c"
          "proto/job.pb.c"
+         "proto/manage.pb.c"
     INCLUDE_DIRS "include" "nanopb" "proto"
     REQUIRES esp_ringbuf esp_tinyusb tinyusb esp_timer esp_websocket_client esp_common log
 )

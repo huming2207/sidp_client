@@ -167,6 +167,8 @@ enum sidp_opcode_t : uint16_t {
 
 `READ_MEMORY_VECTOR` 不是 v1 基础实现的硬要求。支持时通过 Attach response 的 capability bit 宣告。
 
+`0x0100` 及以上是管理服务（设备信息、文件上传、job），见 [sidp-management.md](sidp-management.md)。
+
 ## 5. 统一状态码
 
 ```c

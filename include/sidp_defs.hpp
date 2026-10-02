@@ -39,7 +39,23 @@ namespace sidp
 
         EVT_STOPPED = 0x0080,
         EVT_TARGET_LOST = 0x0081,
+
+        // Management service (docs/sidp-management.md). Payloads are
+        // protobuf messages from proto/manage.proto, except ASSET_WRITE.
+        OP_DEVICE_INFO = 0x0100,
+
+        OP_ASSET_BEGIN = 0x0110,
+        OP_ASSET_WRITE = 0x0111,
+        OP_ASSET_COMMIT = 0x0112,
+
+        OP_JOB_SET = 0x0120,
+        OP_JOB_GET = 0x0121,
+        OP_JOB_RUN_ONCE = 0x0122,
+        OP_JOB_CANCEL = 0x0123,
     };
+
+    /** @brief First opcode of the management service; lower opcodes are debug. */
+    inline constexpr std::uint16_t MANAGEMENT_OPCODE_BASE = 0x0100;
 
     enum status_t : std::int32_t {
         STATUS_OK = 0,
@@ -506,6 +522,12 @@ namespace sidp
         std::uint16_t initial_stack_after;
     };
 
+    /** @brief ASSET_WRITE request: raw asset bytes follow the offset. */
+    struct __attribute__((packed)) asset_write_request_t {
+        std::uint32_t offset;
+        std::uint8_t data[];
+    };
+
     static_assert(std::endian::native == std::endian::little, "SIDP v1 requires a little-endian host");
     static_assert(sizeof(msg_header_t) == 12, "SIDP message header must be 12 bytes");
     static_assert(sizeof(response_prefix_t) == 4, "SIDP response prefix must be 4 bytes");
@@ -534,5 +556,6 @@ namespace sidp
     static_assert(sizeof(set_log_stream_request_t) == 20, "SIDP set-log-stream request must be 20 bytes");
     static_assert(sizeof(log_data_t) == 4, "SIDP log-data prefix must be 4 bytes");
     static_assert(sizeof(attach_gdb_stub_request_t) == 12, "SIDP attach-GDB-stub request must be 12 bytes");
+    static_assert(sizeof(asset_write_request_t) == 4, "SIDP asset-write request prefix must be 4 bytes");
 
 }

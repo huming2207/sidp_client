@@ -9,3 +9,6 @@ si.job.Esp32.chip                   max_size:24
 si.job.Esp32.images                 max_count:8
 si.job.Esp32Image.path              max_size:64
 si.job.Procedure.steps              max_count:96
+si.job.CortexM.firmware_sha256       max_size:32 fixed_length:true
+si.job.Esp32Image.sha256            max_size:32 fixed_length:true
+si.job.Job.name                     max_size:32

@@ -70,11 +70,14 @@ typedef struct _si_job_FlashAlgorithm {
 typedef struct _si_job_CortexM {
     bool has_algorithm;
     si_job_FlashAlgorithm algorithm;
+    /* SHA-256 of /data/firmware.bin; the device refuses any other image. */
+    pb_byte_t firmware_sha256[32];
 } si_job_CortexM;
 
 typedef struct _si_job_Esp32Image {
     char path[64]; /* Device path, e.g. /data/firmware.bin. */
     uint32_t offset;
+    pb_byte_t sha256[32]; /* The device refuses any other image at path. */
 } si_job_Esp32Image;
 
 typedef struct _si_job_Esp32 {
@@ -167,6 +170,7 @@ typedef struct _si_job_Job {
     si_job_Procedure pre_program;
     bool has_post_program;
     si_job_Procedure post_program;
+    char name[32]; /* Shown by JOB_GET; defaults to the variant name. */
 } si_job_Job;
 
 
@@ -210,8 +214,8 @@ extern "C" {
 /* Initializer values for message structs */
 #define si_job_MemoryRegion_init_default         {_si_job_MemoryRegion_Kind_MIN, 0, 0}
 #define si_job_FlashAlgorithm_init_default       {"", 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, 0, false, 0, false, 0, false, 0, {{NULL}, NULL}}
-#define si_job_CortexM_init_default              {false, si_job_FlashAlgorithm_init_default}
-#define si_job_Esp32Image_init_default           {"", 0}
+#define si_job_CortexM_init_default              {false, si_job_FlashAlgorithm_init_default, {0}}
+#define si_job_Esp32Image_init_default           {"", 0, {0}}
 #define si_job_Esp32_init_default                {"", false, 0, 0, 0, 0, 0, {si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default}}
 #define si_job_SelfTest_init_default             {_si_job_SelfTest_Type_MIN, 0, ""}
 #define si_job_Target_init_default               {"", 0, {si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default, si_job_MemoryRegion_init_default}, false, si_job_CortexM_init_default, false, si_job_Esp32_init_default, 0, {si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default, si_job_SelfTest_init_default}}
@@ -223,11 +227,11 @@ extern "C" {
 #define si_job_Delay_init_default                {0}
 #define si_job_Step_init_default                 {0, 0, {si_job_Read32_init_default}}
 #define si_job_Procedure_init_default            {0, {si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default}}
-#define si_job_Job_init_default                  {_si_job_SchemaVersion_MIN, false, si_job_Target_init_default, false, si_job_Procedure_init_default, false, si_job_Procedure_init_default}
+#define si_job_Job_init_default                  {_si_job_SchemaVersion_MIN, false, si_job_Target_init_default, false, si_job_Procedure_init_default, false, si_job_Procedure_init_default, ""}
 #define si_job_MemoryRegion_init_zero            {_si_job_MemoryRegion_Kind_MIN, 0, 0}
 #define si_job_FlashAlgorithm_init_zero          {"", 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, 0, false, 0, false, 0, false, 0, {{NULL}, NULL}}
-#define si_job_CortexM_init_zero                 {false, si_job_FlashAlgorithm_init_zero}
-#define si_job_Esp32Image_init_zero              {"", 0}
+#define si_job_CortexM_init_zero                 {false, si_job_FlashAlgorithm_init_zero, {0}}
+#define si_job_Esp32Image_init_zero              {"", 0, {0}}
 #define si_job_Esp32_init_zero                   {"", false, 0, 0, 0, 0, 0, {si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero}}
 #define si_job_SelfTest_init_zero                {_si_job_SelfTest_Type_MIN, 0, ""}
 #define si_job_Target_init_zero                  {"", 0, {si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero, si_job_MemoryRegion_init_zero}, false, si_job_CortexM_init_zero, false, si_job_Esp32_init_zero, 0, {si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero, si_job_SelfTest_init_zero}}
@@ -239,7 +243,7 @@ extern "C" {
 #define si_job_Delay_init_zero                   {0}
 #define si_job_Step_init_zero                    {0, 0, {si_job_Read32_init_zero}}
 #define si_job_Procedure_init_zero               {0, {si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero}}
-#define si_job_Job_init_zero                     {_si_job_SchemaVersion_MIN, false, si_job_Target_init_zero, false, si_job_Procedure_init_zero, false, si_job_Procedure_init_zero}
+#define si_job_Job_init_zero                     {_si_job_SchemaVersion_MIN, false, si_job_Target_init_zero, false, si_job_Procedure_init_zero, false, si_job_Procedure_init_zero, ""}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define si_job_MemoryRegion_kind_tag             1
@@ -262,8 +266,10 @@ extern "C" {
 #define si_job_FlashAlgorithm_erase_sector_timeout_ms_tag 15
 #define si_job_FlashAlgorithm_instructions_tag   16
 #define si_job_CortexM_algorithm_tag             1
+#define si_job_CortexM_firmware_sha256_tag       2
 #define si_job_Esp32Image_path_tag               1
 #define si_job_Esp32Image_offset_tag             2
+#define si_job_Esp32Image_sha256_tag             3
 #define si_job_Esp32_chip_tag                    1
 #define si_job_Esp32_flash_size_kb_tag           2
 #define si_job_Esp32_baud_tag                    3
@@ -304,6 +310,7 @@ extern "C" {
 #define si_job_Job_target_tag                    2
 #define si_job_Job_pre_program_tag               3
 #define si_job_Job_post_program_tag              4
+#define si_job_Job_name_tag                      5
 
 /* Struct field encoding specification for nanopb */
 #define si_job_MemoryRegion_FIELDLIST(X, a) \
@@ -334,14 +341,16 @@ X(a, CALLBACK, SINGULAR, BYTES,    instructions,     16)
 #define si_job_FlashAlgorithm_DEFAULT NULL
 
 #define si_job_CortexM_FIELDLIST(X, a) \
-X(a, STATIC,   OPTIONAL, MESSAGE,  algorithm,         1)
+X(a, STATIC,   OPTIONAL, MESSAGE,  algorithm,         1) \
+X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, firmware_sha256,   2)
 #define si_job_CortexM_CALLBACK NULL
 #define si_job_CortexM_DEFAULT NULL
 #define si_job_CortexM_algorithm_MSGTYPE si_job_FlashAlgorithm
 
 #define si_job_Esp32Image_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, STRING,   path,              1) \
-X(a, STATIC,   SINGULAR, UINT32,   offset,            2)
+X(a, STATIC,   SINGULAR, UINT32,   offset,            2) \
+X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, sha256,            3)
 #define si_job_Esp32Image_CALLBACK NULL
 #define si_job_Esp32Image_DEFAULT NULL
 
@@ -445,7 +454,8 @@ X(a, STATIC,   REPEATED, MESSAGE,  steps,             1)
 X(a, STATIC,   SINGULAR, UENUM,    schema_version,    1) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  target,            2) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  pre_program,       3) \
-X(a, STATIC,   OPTIONAL, MESSAGE,  post_program,      4)
+X(a, STATIC,   OPTIONAL, MESSAGE,  post_program,      4) \
+X(a, STATIC,   SINGULAR, STRING,   name,              5)
 #define si_job_Job_CALLBACK NULL
 #define si_job_Job_DEFAULT NULL
 #define si_job_Job_target_MSGTYPE si_job_Target
@@ -495,8 +505,8 @@ extern const pb_msgdesc_t si_job_Job_msg;
 #define SI_JOB_JOB_PB_H_MAX_SIZE                 si_job_Procedure_size
 #define si_job_Delay_size                        6
 #define si_job_Empty_size                        0
-#define si_job_Esp32Image_size                   71
-#define si_job_Esp32_size                        625
+#define si_job_Esp32Image_size                   105
+#define si_job_Esp32_size                        897
 #define si_job_MemoryRegion_size                 14
 #define si_job_Poll32_size                       24
 #define si_job_Procedure_size                    2880

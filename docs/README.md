@@ -21,6 +21,7 @@ Cortex-M4 的 FPU 是可选能力。SIDP 以 attach 时返回的 `SIDP_CAP_FPU` 
 - [integration.md](integration.md)：组件连接生命周期、USB回调和清理重试接线。
 - [architecture.md](architecture.md)：总体架构、责任边界和典型调试流程。
 - [sidp-protocol.md](sidp-protocol.md)：Soul Agent 与 Soul Injector 之间的极简二进制协议。
+- [sidp-management.md](sidp-management.md)：管理服务（设备信息、文件上传、烧录 job），opcode 0x0100+。
 - [sidp-addition-esp32-gdbstub.md](sidp-addition-esp32-gdbstub.md)：未来通过目标UART连接ESP32 panic GDB Stub的SIDP扩展设计。
 - [agent-cache-rtos.md](agent-cache-rtos.md)：Soul Agent 端缓存、预读、GDB RSP 映射和 RTOS thread awareness。
 - [target-support-roadmap.md](target-support-roadmap.md)：Cortex-M0/M3/M4 v1范围、实机验证状态和未来 Cortex-M/RISC-V 扩展方式。

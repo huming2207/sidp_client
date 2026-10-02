@@ -1,0 +1,8 @@
+# nanopb limits for the device. sidp-agent enforces the same limits.
+si.manage.DeviceInfo.serial             max_size:32
+si.manage.DeviceInfo.firmware_version   max_size:32
+si.manage.AssetBeginRequest.name        max_size:32
+si.manage.AssetBeginRequest.sha256      max_size:32 fixed_length:true
+si.manage.JobSetRequest.sha256          max_size:32 fixed_length:true
+si.manage.JobStatus.name                max_size:32
+si.manage.JobStatus.sha256              max_size:32 fixed_length:true
