@@ -2,8 +2,7 @@
 //
 // The SIDP header and response status prefix are unchanged; these messages
 // are the payload after them. ASSET_WRITE is the exception: its payload is
-// sidp::asset_write_request_t followed by raw data. See
-// docs/sidp-management.md.
+// sidp::asset_write_request_t followed by raw data.
 syntax = "proto3";
 
 package si.manage;

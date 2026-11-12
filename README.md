@@ -16,21 +16,21 @@ but require hardware validation.
 - `include/sidp_backend.hpp`: hardware interface; the real SWD adapter is still needed.
 - `sidp_transport*.cpp`: CRC, queued transport, USB CDC/SLIP and WebSocket client.
 - `test/`: host session tests with a mock target.
-- `proto/`: protobuf schemas for programming jobs (`job.proto`) and the
-  management service payloads (`manage.proto`), their nanopb size limits
-  (`*.options`) and the generated nanopb sources. Jobs are compiled on the
-  host by `sidp-agent compile`. SIDP frames themselves do not use protobuf.
+- `proto/`: protobuf schemas for programming jobs (`job.proto`), the
+  management service (`manage.proto`, opcodes 0x0100 and up: device info,
+  clock, asset upload, jobs, production log) and the power service
+  (`power.proto`), their nanopb size limits (`*.options`) and the generated
+  nanopb sources. Jobs are compiled on the host by `sidp-agent compile`. The
+  SIDP header and the debug opcodes do not use protobuf.
 - `nanopb/`: vendored nanopb 0.4.9.2 runtime.
-- `docs/sidp-management.md`: management opcodes (device info, clock, asset
-  upload, jobs, production log).
-- `docs/`: protocol, architecture, caching, and target-support documentation.
+- `docs/sidp-power.md`: the power service, opcodes 0x0200 and up.
+- `docs/integration.md`: connection lifecycle and cleanup wiring.
 
 ## Next milestone
 
 Connect the existing session to a real Cortex-M4 target over USB CDC: attach,
-halt, read registers/RAM, continue and detach. See the
-[revised implementation plan](docs/target-support-roadmap.md#11-当前实施计划2026-09-10-调整)
-for the current gaps and deferred features. Host tests do not establish hardware support.
+halt, read registers/RAM, continue and detach. Host tests do not establish
+hardware support.
 
 ## Host tests
 
