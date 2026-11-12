@@ -47,6 +47,13 @@ typedef enum _si_manage_LogEntryType {
     si_manage_LogEntryType_LOG_ENTRY_RUN = 2 /* record is a RunRecord. */
 } si_manage_LogEntryType;
 
+typedef enum _si_manage_NetState {
+    si_manage_NetState_NET_STATE_OFF = 0, /* Networking is disabled or not set up. */
+    si_manage_NetState_NET_STATE_WIFI_CONNECTING = 1, /* Joining the WiFi network. */
+    si_manage_NetState_NET_STATE_SERVER_CONNECTING = 2, /* On WiFi, trying to reach the server. */
+    si_manage_NetState_NET_STATE_CONNECTED = 3 /* Connected to the server. */
+} si_manage_NetState;
+
 /* Struct definitions */
 typedef struct _si_manage_DeviceInfo {
     char serial[32];
@@ -147,6 +154,29 @@ typedef struct _si_manage_LogAckRequest {
     uint64_t up_to_id;
 } si_manage_LogAckRequest;
 
+typedef PB_BYTES_ARRAY_T(32) si_manage_NetConfig_password_salt_t;
+typedef PB_BYTES_ARRAY_T(384) si_manage_NetConfig_password_verifier_t;
+typedef struct _si_manage_NetConfig {
+    bool enabled; /* Connect to the server over WiFi. */
+    char wifi_ssid[33];
+    char wifi_password[65]; /* Write-only: always empty in NET_CONFIG_GET. */
+    char server_url[128]; /* ws://host:port/ of the agent the device connects to. */
+    bool has_wifi_password; /* NET_CONFIG_GET only: a WiFi password is stored. */
+    bool keep_wifi_password; /* NET_CONFIG_SET only: keep the stored password; wifi_password is ignored. */
+    si_manage_NetConfig_password_salt_t password_salt; /* Device password: SRP salt. Write-only. */
+    si_manage_NetConfig_password_verifier_t password_verifier; /* Device password: SRP verifier. Write-only. */
+    bool has_password; /* NET_CONFIG_GET only: a device password is stored. */
+    bool keep_password; /* NET_CONFIG_SET only: keep the stored device password. */
+} si_manage_NetConfig;
+
+typedef struct _si_manage_NetStatus {
+    si_manage_NetState state;
+    char ip[16]; /* Device address while on WiFi. */
+    int32_t rssi; /* dBm while on WiFi; 0 otherwise. */
+    uint32_t wifi_reason; /* Last WiFi disconnect reason (wifi_err_reason_t); 0 if none. */
+    bool network_session; /* SIDP is being served over the network now. */
+} si_manage_NetStatus;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -173,6 +203,10 @@ extern "C" {
 #define _si_manage_LogEntryType_MAX si_manage_LogEntryType_LOG_ENTRY_RUN
 #define _si_manage_LogEntryType_ARRAYSIZE ((si_manage_LogEntryType)(si_manage_LogEntryType_LOG_ENTRY_RUN+1))
 
+#define _si_manage_NetState_MIN si_manage_NetState_NET_STATE_OFF
+#define _si_manage_NetState_MAX si_manage_NetState_NET_STATE_CONNECTED
+#define _si_manage_NetState_ARRAYSIZE ((si_manage_NetState)(si_manage_NetState_NET_STATE_CONNECTED+1))
+
 
 
 
@@ -196,6 +230,9 @@ extern "C" {
 
 
 
+#define si_manage_NetStatus_state_ENUMTYPE si_manage_NetState
+
+
 /* Initializer values for message structs */
 #define si_manage_DeviceInfo_init_default        {"", "", 0, 0, 0, 0, 0}
 #define si_manage_SetTimeRequest_init_default    {0}
@@ -212,6 +249,8 @@ extern "C" {
 #define si_manage_LogEntry_init_default          {0, 0, 0, _si_manage_LogEntryType_MIN, {0, {0}}}
 #define si_manage_LogReadResponse_init_default   {{{NULL}, NULL}}
 #define si_manage_LogAckRequest_init_default     {0}
+#define si_manage_NetConfig_init_default         {0, "", "", "", 0, 0, {0, {0}}, {0, {0}}, 0, 0}
+#define si_manage_NetStatus_init_default         {_si_manage_NetState_MIN, "", 0, 0, 0}
 #define si_manage_DeviceInfo_init_zero           {"", "", 0, 0, 0, 0, 0}
 #define si_manage_SetTimeRequest_init_zero       {0}
 #define si_manage_AssetBeginRequest_init_zero    {"", 0, {0}}
@@ -227,6 +266,8 @@ extern "C" {
 #define si_manage_LogEntry_init_zero             {0, 0, 0, _si_manage_LogEntryType_MIN, {0, {0}}}
 #define si_manage_LogReadResponse_init_zero      {{{NULL}, NULL}}
 #define si_manage_LogAckRequest_init_zero        {0}
+#define si_manage_NetConfig_init_zero            {0, "", "", "", 0, 0, {0, {0}}, {0, {0}}, 0, 0}
+#define si_manage_NetStatus_init_zero            {_si_manage_NetState_MIN, "", 0, 0, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define si_manage_DeviceInfo_serial_tag          1
@@ -271,6 +312,21 @@ extern "C" {
 #define si_manage_LogEntry_record_tag            5
 #define si_manage_LogReadResponse_entries_tag    1
 #define si_manage_LogAckRequest_up_to_id_tag     1
+#define si_manage_NetConfig_enabled_tag          1
+#define si_manage_NetConfig_wifi_ssid_tag        2
+#define si_manage_NetConfig_wifi_password_tag    3
+#define si_manage_NetConfig_server_url_tag       4
+#define si_manage_NetConfig_has_wifi_password_tag 5
+#define si_manage_NetConfig_keep_wifi_password_tag 6
+#define si_manage_NetConfig_password_salt_tag    7
+#define si_manage_NetConfig_password_verifier_tag 8
+#define si_manage_NetConfig_has_password_tag     9
+#define si_manage_NetConfig_keep_password_tag    10
+#define si_manage_NetStatus_state_tag            1
+#define si_manage_NetStatus_ip_tag               2
+#define si_manage_NetStatus_rssi_tag             3
+#define si_manage_NetStatus_wifi_reason_tag      4
+#define si_manage_NetStatus_network_session_tag  5
 
 /* Struct field encoding specification for nanopb */
 #define si_manage_DeviceInfo_FIELDLIST(X, a) \
@@ -378,6 +434,29 @@ X(a, STATIC,   SINGULAR, UINT64,   up_to_id,          1)
 #define si_manage_LogAckRequest_CALLBACK NULL
 #define si_manage_LogAckRequest_DEFAULT NULL
 
+#define si_manage_NetConfig_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BOOL,     enabled,           1) \
+X(a, STATIC,   SINGULAR, STRING,   wifi_ssid,         2) \
+X(a, STATIC,   SINGULAR, STRING,   wifi_password,     3) \
+X(a, STATIC,   SINGULAR, STRING,   server_url,        4) \
+X(a, STATIC,   SINGULAR, BOOL,     has_wifi_password,   5) \
+X(a, STATIC,   SINGULAR, BOOL,     keep_wifi_password,   6) \
+X(a, STATIC,   SINGULAR, BYTES,    password_salt,     7) \
+X(a, STATIC,   SINGULAR, BYTES,    password_verifier,   8) \
+X(a, STATIC,   SINGULAR, BOOL,     has_password,      9) \
+X(a, STATIC,   SINGULAR, BOOL,     keep_password,    10)
+#define si_manage_NetConfig_CALLBACK NULL
+#define si_manage_NetConfig_DEFAULT NULL
+
+#define si_manage_NetStatus_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UENUM,    state,             1) \
+X(a, STATIC,   SINGULAR, STRING,   ip,                2) \
+X(a, STATIC,   SINGULAR, INT32,    rssi,              3) \
+X(a, STATIC,   SINGULAR, UINT32,   wifi_reason,       4) \
+X(a, STATIC,   SINGULAR, BOOL,     network_session,   5)
+#define si_manage_NetStatus_CALLBACK NULL
+#define si_manage_NetStatus_DEFAULT NULL
+
 extern const pb_msgdesc_t si_manage_DeviceInfo_msg;
 extern const pb_msgdesc_t si_manage_SetTimeRequest_msg;
 extern const pb_msgdesc_t si_manage_AssetBeginRequest_msg;
@@ -393,6 +472,8 @@ extern const pb_msgdesc_t si_manage_LogReadRequest_msg;
 extern const pb_msgdesc_t si_manage_LogEntry_msg;
 extern const pb_msgdesc_t si_manage_LogReadResponse_msg;
 extern const pb_msgdesc_t si_manage_LogAckRequest_msg;
+extern const pb_msgdesc_t si_manage_NetConfig_msg;
+extern const pb_msgdesc_t si_manage_NetStatus_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define si_manage_DeviceInfo_fields &si_manage_DeviceInfo_msg
@@ -410,10 +491,12 @@ extern const pb_msgdesc_t si_manage_LogAckRequest_msg;
 #define si_manage_LogEntry_fields &si_manage_LogEntry_msg
 #define si_manage_LogReadResponse_fields &si_manage_LogReadResponse_msg
 #define si_manage_LogAckRequest_fields &si_manage_LogAckRequest_msg
+#define si_manage_NetConfig_fields &si_manage_NetConfig_msg
+#define si_manage_NetStatus_fields &si_manage_NetStatus_msg
 
 /* Maximum encoded size of messages (where known) */
 /* si_manage_LogReadResponse_size depends on runtime parameters */
-#define SI_MANAGE_MANAGE_PB_H_MAX_SIZE           si_manage_LogEntry_size
+#define SI_MANAGE_MANAGE_PB_H_MAX_SIZE           si_manage_NetConfig_size
 #define si_manage_AssetBeginRequest_size         73
 #define si_manage_AssetBeginResponse_size        8
 #define si_manage_BootRecord_size                6
@@ -425,6 +508,8 @@ extern const pb_msgdesc_t si_manage_LogAckRequest_msg;
 #define si_manage_LogAckRequest_size             11
 #define si_manage_LogEntry_size                  166
 #define si_manage_LogReadRequest_size            11
+#define si_manage_NetConfig_size                 661
+#define si_manage_NetStatus_size                 38
 #define si_manage_RunRecord_size                 98
 #define si_manage_RunResult_size                 16
 #define si_manage_SetTimeRequest_size            11

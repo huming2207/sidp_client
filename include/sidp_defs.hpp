@@ -57,6 +57,12 @@ namespace sidp
         OP_LOG_READ = 0x0130,
         OP_LOG_ACK = 0x0131,
 
+        OP_NET_CONFIG_GET = 0x0140,
+        OP_NET_CONFIG_SET = 0x0141, // USB only
+        OP_NET_STATUS = 0x0142,
+
+        OP_LOGIN = 0x0150, // Network only: protocomm Security 2 handshake
+
         // Power service (docs/sidp-power.md). Payloads are protobuf messages from
         // proto/power.proto, except POWER_DATA, which is power_data_t below.
         OP_POWER_INFO = 0x0200,
@@ -90,6 +96,7 @@ namespace sidp
         STATUS_TARGET_MISMATCH = 25,
 
         STATUS_LOG_FULL = 30, // Management: production log needs collecting before a run
+        STATUS_UNAUTHORIZED = 31, // Network: log in first, or the login failed
     };
 
     enum architecture_t : std::uint8_t {

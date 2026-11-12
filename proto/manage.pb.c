@@ -51,6 +51,14 @@ PB_BIND(si_manage_LogReadResponse, si_manage_LogReadResponse, AUTO)
 PB_BIND(si_manage_LogAckRequest, si_manage_LogAckRequest, AUTO)
 
 
+PB_BIND(si_manage_NetConfig, si_manage_NetConfig, 2)
+
+
+PB_BIND(si_manage_NetStatus, si_manage_NetStatus, AUTO)
+
+
+
+
 
 
 

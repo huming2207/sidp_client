@@ -59,9 +59,12 @@ int main() {
     t.deliver_packet(request.data(), request.size(), old_epoch); // delayed old callback
     expect_empty(t);
 
+    assert(!t.has_request());
     t.deliver_packet(request.data(), request.size(), t.receive_epoch());
+    assert(t.has_request());
     std::uint8_t *borrowed; std::size_t size;
     assert(t.start_read(&borrowed, &size, 0) == ESP_OK);
+    assert(!t.has_request());
     t.disconnect(); t.connect();
     assert(t.begin_session() == ESP_ERR_INVALID_STATE);
     t.end_read(borrowed);
@@ -122,7 +125,14 @@ int main() {
     assert(host_websocket.disable_auto_reconnect);
     assert(!host_websocket.enable_close_reconnect);
     host_ws_event(WEBSOCKET_EVENT_CONNECTED); // null event_data is valid
+    // Connected is not a SIDP connection yet: that takes "open", as DTR on USB.
+    assert(ws.server_connected());
+    assert(ws.begin_session() == ESP_ERR_INVALID_STATE);
+    host_ws_text("open");
     assert(ws.begin_session() == ESP_OK);
+    assert(ws.finish("ready") == ESP_OK && host_websocket.last_text == "ready");
+    host_ws_text("open"); // repeated: still the same connection
+    assert(ws.is_open());
     esp_websocket_event_data_t event;
     event.payload_len = event.data_len = request.size();
     event.data_ptr = reinterpret_cast<char *>(request.data());
@@ -130,22 +140,32 @@ int main() {
     assert(ws.start_read(&borrowed, &size, 0) == ESP_OK);
     ws.end_read(borrowed);
     host_ws_event(WEBSOCKET_EVENT_DATA, &event); // queued old request
-    host_ws_event(WEBSOCKET_EVENT_DISCONNECTED);
-    host_ws_event(WEBSOCKET_EVENT_CONNECTED);
-    assert(ws.needs_disconnect());
+    // "close" ends the SIDP connection but keeps the WebSocket.
+    host_ws_text("close");
+    assert(ws.needs_disconnect() && ws.server_connected());
+    assert(ws.finish("closed") == ESP_OK && host_websocket.last_text == "closed");
+    host_ws_text("open");
     assert(ws.begin_session() == ESP_OK);
     expect_empty(ws);
     // Old fragmented message cannot continue into a new session.
     event.fin = false;
     host_ws_event(WEBSOCKET_EVENT_DATA, &event);
-    ws.close_session();
+    // Refusing an "open" ends it; the next "open" is a new connection.
+    assert(ws.finish("busy") == ESP_OK && host_websocket.last_text == "busy");
+    assert(ws.needs_disconnect());
     assert(ws.begin_session() == ESP_ERR_INVALID_STATE);
-    host_ws_event(WEBSOCKET_EVENT_DISCONNECTED);
-    host_ws_event(WEBSOCKET_EVENT_CONNECTED);
+    host_ws_text("open");
     assert(ws.begin_session() == ESP_OK);
     event.fin = true; event.op_code = WS_TRANSPORT_OPCODES_CONT;
     host_ws_event(WEBSOCKET_EVENT_DATA, &event);
     expect_empty(ws);
+    // Losing the WebSocket ends the connection; reconnecting needs "open" again.
+    host_ws_event(WEBSOCKET_EVENT_DISCONNECTED);
+    assert(ws.needs_disconnect());
+    host_ws_event(WEBSOCKET_EVENT_CONNECTED);
+    assert(ws.begin_session() == ESP_ERR_INVALID_STATE);
+    host_ws_text("open");
+    assert(ws.begin_session() == ESP_OK);
 
     for (auto closed : {WEBSOCKET_EVENT_CLOSED, WEBSOCKET_EVENT_FINISH, WEBSOCKET_EVENT_ERROR}) {
         host_ws_event(closed);
@@ -153,6 +173,7 @@ int main() {
         host_ws_event(WEBSOCKET_EVENT_DISCONNECTED);
         assert(ws.reconnect() == ESP_OK); // client already stopped
         host_ws_event(WEBSOCKET_EVENT_CONNECTED);
+        host_ws_text("open");
         assert(ws.begin_session() == ESP_OK);
         expect_empty(ws);
     }

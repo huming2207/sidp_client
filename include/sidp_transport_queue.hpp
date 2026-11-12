@@ -48,10 +48,16 @@ namespace sidp
         [[nodiscard]] esp_err_t flush_write(std::uint32_t timeout_ms) noexcept final;
         [[nodiscard]] std::uint32_t tx_dropped_frames() const noexcept final;
 
+        /** True while a received message waits for start_read(). */
+        [[nodiscard]] bool has_request() noexcept;
+
     protected:
+        static constexpr std::size_t LOG_QUEUE_SIZE = 4096;
+
         packet_queue_transport() noexcept = default;
         ~packet_queue_transport() override = default;
-        [[nodiscard]] esp_err_t create_queues() noexcept;
+        /** @p log_queue_size: bytes of expendable frames held while the link is slow. */
+        [[nodiscard]] esp_err_t create_queues(std::size_t log_queue_size = LOG_QUEUE_SIZE) noexcept;
         void destroy_queues() noexcept;
         [[nodiscard]] esp_err_t spawn_tx_task(const char *name) noexcept;
 
@@ -76,7 +82,6 @@ namespace sidp
 
     private:
         static constexpr std::size_t QUEUE_SIZE = 131072;
-        static constexpr std::size_t LOG_QUEUE_SIZE = 4096;
         static constexpr std::size_t MAX_LOG_FRAME_SIZE = sizeof(msg_header_t) + sizeof(log_data_t) + 1024;
         static constexpr std::size_t TX_TASK_STACK_SIZE = 4096;
         static constexpr UBaseType_t TX_TASK_PRIORITY = 3;
@@ -130,6 +135,7 @@ namespace sidp
         std::uint64_t link_serial = 0;
         std::uint64_t accepted_link_serial = 0;
         std::size_t rx_borrowed = 0;
+        std::size_t rx_queued = 0;
         std::size_t tx_pending = 0;
         bool tx_busy = false;
         std::atomic<bool> dead{true};

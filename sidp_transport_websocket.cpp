@@ -1,8 +1,12 @@
 #include "sidp_transport_websocket.hpp"
 
 #include "esp_log.h"
+#include "esp_transport.h"
 
 #include <cstring>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
 #include "esp_heap_caps.h"
 
@@ -22,7 +26,7 @@ namespace sidp
             return ESP_ERR_NO_MEM;
         }
 
-        const esp_err_t queue_result = create_queues();
+        const esp_err_t queue_result = create_queues(WS_LOG_QUEUE_SIZE);
         if (queue_result != ESP_OK) {
             ESP_LOGE(TAG, "init: queue creation failed");
             heap_caps_free(input_buffer);
@@ -53,10 +57,13 @@ namespace sidp
         }
 
         client = websocket_client;
+        ext_transport = config.ext_transport;
         staging_buffer = input_buffer;
         initialized = true;
 
+        connecting.store(true);
         if (esp_websocket_client_start(client) != ESP_OK) {
+            connecting.store(false);
             ESP_LOGE(TAG, "init: esp_websocket_client_start failed");
             esp_websocket_unregister_events(websocket_client, WEBSOCKET_EVENT_ANY, websocket_event_handler);
             esp_websocket_client_destroy(websocket_client);
@@ -88,11 +95,15 @@ namespace sidp
 
     bool websocket_transport::deliver_tx_frame(std::span<const std::uint8_t> frame, bool log) noexcept
     {
+        (void)log;
         if (!is_open()) {
             return false;
         }
+        // Log frames get the full timeout too: the client aborts the connection when a send times
+        // out, so a short timeout would turn a WiFi delay into a lost session. Logs are still
+        // dropped when their queue is full, before they are sent.
         const int sent = esp_websocket_client_send_bin(client, reinterpret_cast<const char *>(frame.data()),
-                                                       static_cast<int>(frame.size()), timeout_to_ticks(log ? 20 : WS_SEND_TIMEOUT_MS));
+                                                       static_cast<int>(frame.size()), timeout_to_ticks(WS_SEND_TIMEOUT_MS));
         if (sent == static_cast<int>(frame.size())) {
             return true;
         }
@@ -109,12 +120,46 @@ namespace sidp
         // This API reports ESP_FAIL when the task has already stopped after
         // a disconnect. Starting again is valid in that case.
         if (stopped != ESP_OK && stopped != ESP_FAIL) return stopped;
-        return esp_websocket_client_start(client);
+        connecting.store(true);
+        const esp_err_t started = esp_websocket_client_start(client);
+        if (started != ESP_OK) connecting.store(false);
+        return started;
+    }
+
+    bool websocket_transport::server_connected() const noexcept
+    {
+        return initialized && esp_websocket_client_is_connected(client);
     }
 
     bool websocket_transport::physical_link_open() const noexcept
     {
-        return initialized && esp_websocket_client_is_connected(client);
+        return opened.load() && server_connected();
+    }
+
+    esp_err_t websocket_transport::finish(const char *reply) noexcept
+    {
+        if (strcmp(reply, "ready") != 0) {
+            opened.store(false);
+            link_changed(false);
+        }
+        if (!server_connected()) return ESP_ERR_INVALID_STATE;
+        const int len = static_cast<int>(strlen(reply));
+        return esp_websocket_client_send_text(client, reply, len, timeout_to_ticks(WS_SEND_TIMEOUT_MS)) == len ? ESP_OK : ESP_FAIL;
+    }
+
+    void websocket_transport::handle_text(const esp_websocket_event_data_t &data) noexcept
+    {
+        // Session messages are a few bytes and always arrive in one piece.
+        if (!data.fin || data.payload_offset != 0 || data.data_len != data.payload_len) return;
+        const std::size_t len = static_cast<std::size_t>(data.data_len);
+        if (len == 4 && memcmp(data.data_ptr, "open", 4) == 0) {
+            if (!opened.exchange(true)) {
+                link_changed(true); // A new SIDP connection, as DTR asserted on USB
+            }
+        } else if (len == 5 && memcmp(data.data_ptr, "close", 5) == 0) {
+            opened.store(false);
+            link_changed(false);
+        }
     }
 
     void
@@ -125,19 +170,34 @@ namespace sidp
             return;
         }
         switch (event_id) {
-        case WEBSOCKET_EVENT_CONNECTED:
-            static_cast<websocket_transport *>(handler_arg)->link_changed(true);
-            static_cast<websocket_transport *>(handler_arg)->reset_staging();
+        case WEBSOCKET_EVENT_CONNECTED: {
+            auto *self = static_cast<websocket_transport *>(handler_arg);
+            self->connecting.store(false);
+            self->opened.store(false); // Wait for "open"
+            self->link_changed(false);
+            self->reset_staging();
+            if (self->ext_transport != nullptr) {
+                const int fd = esp_transport_get_socket(self->ext_transport);
+                const int one = 1;
+                if (fd < 0 || setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
+                    ESP_LOGW(TAG, "websocket_event_handler: cannot turn Nagle off");
+                }
+            }
             ESP_LOGI(TAG, "websocket_event_handler: websocket connected");
             return;
+        }
         case WEBSOCKET_EVENT_CLOSED:
         case WEBSOCKET_EVENT_FINISH:
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGE(TAG, "websocket_event_handler: websocket disconnected");
+            static_cast<websocket_transport *>(handler_arg)->connecting.store(false);
+            static_cast<websocket_transport *>(handler_arg)->opened.store(false);
             static_cast<websocket_transport *>(handler_arg)->link_changed(false);
             static_cast<websocket_transport *>(handler_arg)->reset_staging();
             return;
         case WEBSOCKET_EVENT_ERROR:
+            static_cast<websocket_transport *>(handler_arg)->connecting.store(false);
+            static_cast<websocket_transport *>(handler_arg)->opened.store(false);
             static_cast<websocket_transport *>(handler_arg)->link_changed(false);
             static_cast<websocket_transport *>(handler_arg)->reset_staging();
             ESP_LOGE(TAG, "websocket_event_handler: websocket error event");
@@ -155,6 +215,11 @@ namespace sidp
 
     void websocket_transport::handle_data(const esp_websocket_event_data_t &data) noexcept
     {
+        if (data.op_code == WS_TRANSPORT_OPCODES_TEXT) {
+            handle_text(data);
+            return;
+        }
+
         const auto current_epoch = receive_epoch();
         if (staging_epoch != current_epoch || !is_open()) {
             reset_staging();

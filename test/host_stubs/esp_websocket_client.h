@@ -1,14 +1,19 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
+#include <string>
 #include "esp_err.h"
+#include "esp_transport.h"
 #include "freertos/FreeRTOS.h"
 using esp_event_base_t = const char *;
 using esp_event_handler_t = void (*)(void *, esp_event_base_t, std::int32_t, void *);
 inline constexpr int WEBSOCKET_EVENT_ANY = -1, WEBSOCKET_EVENT_CONNECTED = 1,
     WEBSOCKET_EVENT_DISCONNECTED = 2, WEBSOCKET_EVENT_ERROR = 3, WEBSOCKET_EVENT_DATA = 4,
     WEBSOCKET_EVENT_CLOSED = 5, WEBSOCKET_EVENT_FINISH = 6;
-inline constexpr int WS_TRANSPORT_OPCODES_BINARY = 2, WS_TRANSPORT_OPCODES_CONT = 0;
+inline constexpr int WS_TRANSPORT_OPCODES_BINARY = 2, WS_TRANSPORT_OPCODES_CONT = 0,
+    WS_TRANSPORT_OPCODES_TEXT = 1;
 struct esp_websocket_client_config_t {
+    esp_transport_handle_t ext_transport = nullptr;
     int buffer_size = 0;
     bool disable_auto_reconnect = false;
     bool enable_close_reconnect = true;
@@ -24,6 +29,7 @@ struct host_ws {
     bool disable_auto_reconnect = false;
     bool enable_close_reconnect = true;
     int events = 0;
+    std::string last_text;
     esp_event_handler_t callback = nullptr;
     void *arg = nullptr;
 };
@@ -52,3 +58,14 @@ inline esp_err_t esp_websocket_client_stop(host_ws *ws) {
 inline esp_err_t esp_websocket_client_destroy(host_ws *) { return ESP_OK; }
 inline bool esp_websocket_client_is_connected(host_ws *client) { return client->connected; }
 inline int esp_websocket_client_send_bin(host_ws *, const char *, int size, TickType_t) { return size; }
+inline int esp_websocket_client_send_text(host_ws *client, const char *data, int len, TickType_t) {
+    client->last_text.assign(data, len); return len;
+}
+// Delivers a text message from the server, as the client's DATA event does.
+inline void host_ws_text(const char *text) {
+    esp_websocket_event_data_t event;
+    event.op_code = WS_TRANSPORT_OPCODES_TEXT;
+    event.payload_len = event.data_len = static_cast<int>(strlen(text));
+    event.data_ptr = const_cast<char *>(text);
+    host_ws_event(WEBSOCKET_EVENT_DATA, &event);
+}

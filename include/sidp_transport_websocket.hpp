@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -26,7 +27,18 @@ namespace sidp
      * packet_queue_transport base.
      *
      * The Espressif client owns connection establishment, TLS and keepalive.
-     * Reconnect is explicit after SIDP cleanup, including clean CLOSE events.
+     * Reconnect is explicit, including after clean CLOSE events.
+     *
+     * The device stays connected between SIDP connections. The server marks
+     * each one with text messages, which do what DTR does on USB: "open"
+     * starts a SIDP connection and "close" ends it. The owner answers with
+     * finish(): "ready" once accepted, "busy" when it cannot serve one now,
+     * "closed" once the target is cleaned up.
+     *
+     * A WebSocket frame's header and payload are written separately, so with
+     * Nagle's algorithm every frame would wait for the peer's delayed ACK.
+     * When the caller supplies ext_transport, Nagle is turned off on its
+     * socket at each connection.
      *
      * init() performs all transport-owned allocation. One reader and one
      * writer may operate concurrently; callers must serialize writers.
@@ -69,10 +81,26 @@ namespace sidp
          */
         [[nodiscard]] esp_err_t reconnect() noexcept;
 
+        /** True from start or reconnect() until the attempt connects or fails. */
+        [[nodiscard]] bool is_connecting() const noexcept { return connecting.load(); }
+
+        /** The WebSocket itself is connected, whether or not a SIDP connection is open. */
+        [[nodiscard]] bool server_connected() const noexcept;
+
+        /**
+         * Sends "ready" after begin_session() accepted an "open", or ends the SIDP
+         * connection and sends @p reply: "busy" to refuse an "open", "closed"
+         * after cleanup. Call from the owner task.
+         */
+        esp_err_t finish(const char *reply) noexcept;
+
     private:
         [[nodiscard]] bool physical_link_open() const noexcept override;
         websocket_transport() noexcept = default;
         ~websocket_transport() override = default;
+
+        /** Power data for a few seconds of WiFi trouble; USB keeps the default. */
+        inline static constexpr std::size_t WS_LOG_QUEUE_SIZE = 32768;
 
         /** @brief Maximum blocking interval for one send_bin() call. */
         inline static constexpr std::uint32_t WS_SEND_TIMEOUT_MS = 5000;
@@ -82,6 +110,9 @@ namespace sidp
 
         /** @brief Handles one WebSocket data callback. */
         void handle_data(const esp_websocket_event_data_t &data) noexcept;
+
+        /** Handles "open" and "close" from the server. */
+        void handle_text(const esp_websocket_event_data_t &data) noexcept;
 
         /** @brief Clears the currently staged message. */
         void reset_staging() noexcept;
@@ -96,6 +127,9 @@ namespace sidp
         bool staging_active = false;
         bool staging_discarded = false;
         bool initialized = false;
+        std::atomic<bool> connecting{false};
+        std::atomic<bool> opened{false}; // "open" received, "close" not yet
+        esp_transport_handle_t ext_transport = nullptr;
 
         static constexpr char TAG[] = "sidp_ws";
     };

@@ -142,3 +142,40 @@ message LogReadResponse {
 message LogAckRequest {
     uint64 up_to_id = 1;
 }
+
+// ---- Network (0x0140 and up) ----
+// Settings are stored in NVS and used from the next boot. NET_CONFIG_SET is
+// accepted over USB only.
+//
+// Over the network, every request other than LOGIN (0x0150) is refused with
+// STATUS_UNAUTHORIZED until the login succeeds. LOGIN carries the session
+// handshake of ESP-IDF's protocomm Security 2 (its SessionData message, twice):
+// SRP6a, checked against the password's salt and verifier stored here.
+
+message NetConfig {
+    bool enabled = 1;          // Connect to the server over WiFi.
+    string wifi_ssid = 2;
+    string wifi_password = 3;  // Write-only: always empty in NET_CONFIG_GET.
+    string server_url = 4;     // ws://host:port/ of the agent the device connects to.
+    bool has_wifi_password = 5;  // NET_CONFIG_GET only: a WiFi password is stored.
+    bool keep_wifi_password = 6; // NET_CONFIG_SET only: keep the stored password; wifi_password is ignored.
+    bytes password_salt = 7;     // Device password: SRP salt. Write-only.
+    bytes password_verifier = 8; // Device password: SRP verifier. Write-only.
+    bool has_password = 9;       // NET_CONFIG_GET only: a device password is stored.
+    bool keep_password = 10;     // NET_CONFIG_SET only: keep the stored device password.
+}
+
+enum NetState {
+    NET_STATE_OFF = 0;              // Networking is disabled or not set up.
+    NET_STATE_WIFI_CONNECTING = 1;  // Joining the WiFi network.
+    NET_STATE_SERVER_CONNECTING = 2; // On WiFi, trying to reach the server.
+    NET_STATE_CONNECTED = 3;        // Connected to the server.
+}
+
+message NetStatus {
+    NetState state = 1;
+    string ip = 2;            // Device address while on WiFi.
+    int32 rssi = 3;           // dBm while on WiFi; 0 otherwise.
+    uint32 wifi_reason = 4;   // Last WiFi disconnect reason (wifi_err_reason_t); 0 if none.
+    bool network_session = 5; // SIDP is being served over the network now.
+}

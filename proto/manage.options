@@ -9,3 +9,9 @@ si.manage.JobStatus.sha256              max_size:32 fixed_length:true
 si.manage.RunRecord.job_name            max_size:32
 si.manage.RunRecord.job_sha256          max_size:32 fixed_length:true
 si.manage.LogEntry.record               max_size:128
+si.manage.NetConfig.wifi_ssid           max_size:33
+si.manage.NetConfig.wifi_password       max_size:65
+si.manage.NetConfig.server_url          max_size:128
+si.manage.NetConfig.password_salt       max_size:32
+si.manage.NetConfig.password_verifier   max_size:384
+si.manage.NetStatus.ip                  max_size:16

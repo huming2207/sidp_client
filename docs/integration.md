@@ -73,25 +73,47 @@ Both unexpected-disconnect and clean-CLOSE automatic reconnect are disabled.
 All WebSocket events are registered, including disconnect, error, closed and
 finish events. They latch the SIDP connection closed and invalidate partial RX.
 
-After target cleanup, call `websocket_transport::reconnect()` from the connection
-manager, never from a WebSocket callback. It waits for the library client to stop
-and starts a fresh physical connection; if a TX call remains in flight it returns
-`ESP_ERR_INVALID_STATE` so the owner can retry later. After CONNECTED, accept it
-with `begin_session()` before dispatching requests.
+The WebSocket stays connected between SIDP connections. Text messages from
+the server do what DTR does on USB: `open` makes a new connection that
+`begin_session()` accepts, and `close` ends it, as does losing the WebSocket.
+The owner answers with `finish()`: `ready` after `begin_session()` accepted an
+`open`; `busy` to refuse one (the device is in use over USB); `closed` once
+the target is cleaned up, also when the owner ended the connection itself.
+
+When the WebSocket itself drops, call `websocket_transport::reconnect()` from
+the connection manager, never from a WebSocket callback. `server_connected()`
+tells whether the WebSocket is up and `is_connecting()` whether an attempt is
+in progress. `reconnect()` waits for the library client to stop and starts a
+fresh physical connection; if a TX call remains in flight it returns
+`ESP_ERR_INVALID_STATE` so the owner can retry later.
+
+lwIP leaves Nagle's algorithm on, and the WebSocket layer writes each frame's
+header and payload separately, so every frame would wait for the peer's
+delayed ACK. Pass your own transport in `ext_transport` (`esp_transport_tcp`
+under `esp_transport_ws`, with `propagate_control_frames` set as the client
+sets it for its own); the component then turns `TCP_NODELAY` on at each
+connection.
+
+`has_request()` tells whether a received request waits for `start_read()`; the
+owner uses it to let USB take over only once USB sends a request.
 
 The caller still supplies authentication/TLS configuration. The component does
-not implement pairing, a WSS server or a cloud relay.
+not implement pairing, a WSS server or a cloud relay. Soul Injector's service
+runs a password login (protocomm Security 2) as SIDP requests after `ready`.
 
 ## Control and logs
 
-Responses and events share one ordered control FIFO. Logs have a separate 4 KiB
-queue and a maximum 1024-byte log buffer per frame. A full log queue drops logs
-only; a full control queue ends the session immediately. The TX task selects a
+Responses and events share one ordered control FIFO. Logs have a separate
+queue (4 KiB on USB, 32 KiB on WebSocket, where WiFi stalls are longer) and a
+maximum 1024-byte log buffer per frame. A full log queue drops logs only; a full control queue ends the session immediately. The TX task selects a
 control frame before selecting a log frame, so a log backlog cannot fill or sit
 in front of the control queue.
 
-A frame already on the wire cannot be preempted. Log sends use a 20 ms API timeout
-(rounded up to a FreeRTOS tick), rather than the 5 s control-send timeout. Driver
+A frame already on the wire cannot be preempted. Over USB, log sends use a 20 ms
+API timeout (rounded up to a FreeRTOS tick), rather than the 5 s control-send
+timeout. Over WebSocket they get the 5 s timeout too: `esp_websocket_client`
+aborts the connection when a send times out, so a short timeout would turn a
+WiFi delay into a lost session. Logs are still dropped when their queue is full. Driver
 scheduling and lock acquisition also contribute to actual elapsed time. Any
 failed transmission ends the session because a partially delivered frame cannot
 be treated as an intact message. `flush_write()` reports failure after that loss,

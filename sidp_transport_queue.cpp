@@ -37,6 +37,7 @@ namespace sidp
         drain(tx_ring);
         drain(log_ring);
         tx_pending = 0;
+        rx_queued = 0;
     }
 
     void packet_queue_transport::close_session() noexcept
@@ -81,6 +82,7 @@ namespace sidp
                 auto *packet = static_cast<std::uint8_t *>(xRingbufferReceive(ring_buffer, len_out, 0));
                 if (packet != nullptr) {
                     ++rx_borrowed;
+                    --rx_queued;
                     *buf_out = packet;
                     return ESP_OK;
                 }
@@ -101,7 +103,7 @@ namespace sidp
         }
     }
 
-    esp_err_t packet_queue_transport::create_queues() noexcept
+    esp_err_t packet_queue_transport::create_queues(std::size_t log_queue_size) noexcept
     {
         // The mutex is taken/given on every RX and TX operation, so create it
         // once here with explicit memory caps (PSRAM) and release it in
@@ -116,7 +118,7 @@ namespace sidp
         }
         ring_buffer = xRingbufferCreateWithCaps(QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
         tx_ring = xRingbufferCreateWithCaps(QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
-        log_ring = xRingbufferCreateWithCaps(LOG_QUEUE_SIZE, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
+        log_ring = xRingbufferCreateWithCaps(log_queue_size, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
         if (ring_buffer == nullptr || tx_ring == nullptr || log_ring == nullptr) {
             destroy_queues();
             return ESP_ERR_NO_MEM;
@@ -146,7 +148,9 @@ namespace sidp
         if (data[0] != PROTOCOL_VERSION || xRingbufferSend(ring_buffer, data, size, 0) != pdTRUE) {
             // Losing a request or receiving an unknown layout ends this session.
             close_locked();
+            return;
         }
+        ++rx_queued;
     }
 
     TickType_t packet_queue_transport::timeout_to_ticks(std::uint32_t timeout_ms) noexcept
@@ -200,6 +204,12 @@ namespace sidp
             const TickType_t slice = timeout_to_ticks(POLL_MS);
             vTaskDelay(timeout_ms == WAIT_FOREVER || limit - elapsed > slice ? slice : limit - elapsed);
         }
+    }
+
+    bool packet_queue_transport::has_request() noexcept
+    {
+        const queue_guard lock(queue_mutex);
+        return is_open() && rx_queued != 0;
     }
 
     std::uint32_t packet_queue_transport::tx_dropped_frames() const noexcept
