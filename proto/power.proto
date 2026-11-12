@@ -1,0 +1,65 @@
+// Soul Injector power service payloads (SIDP opcodes 0x0200 and up).
+//
+// The SIDP header and response status prefix are unchanged; these messages
+// are the payload after them. POWER_DATA is the exception: it is
+// sidp::power_data_t followed by runs of raw samples. See docs/sidp-power.md.
+syntax = "proto3";
+
+package si.power;
+
+// Which shunt a current was measured on. Same values as sidp::power_range_t.
+enum Range {
+    RANGE_LOW = 0;
+    RANGE_MID = 1;
+    RANGE_HIGH = 2;
+}
+
+message RangeInfo {
+    Range range = 1;
+    float shunt_ohm = 2; // Current = shunt code x shunt_lsb_v / shunt_ohm.
+    float chain_ohm = 3; // VPP_INPUT to VPP_OUTPUT in this range: Vout = Vin - current x chain_ohm.
+}
+
+message PowerInfo {
+    repeated RangeInfo ranges = 1;
+    float shunt_lsb_v = 2;
+    float bus_lsb_v = 3;               // Bus codes measure VPP_INPUT.
+    repeated uint32 conversion_us = 4; // Accepted conversion times, ascending.
+    repeated uint32 averages = 5;      // Accepted averaging counts, ascending.
+    uint32 min_sample_period_us = 6;   // conversion_us x averages must not be shorter.
+    bool vout_measured = 7;            // False: Vout is computed from Vin, as above.
+}
+
+// The sample period is conversion_us x averages.
+message StartRequest {
+    uint32 conversion_us = 1;
+    uint32 averages = 2;
+    Range lowest_range = 3; // Never step below this range; RANGE_LOW ranges freely.
+    uint32 duration_ms = 4; // 0: until POWER_STOP or the connection closes.
+}
+
+message StartResponse {
+    uint32 sample_period_us = 1; // Nominal; samples carry their own times.
+    uint64 start_us = 2;         // Device clock, as in power_data_t::t_us.
+}
+
+// Totals since POWER_START.
+message StopResponse {
+    uint32 samples = 1;
+    uint32 dropped_frames = 2;
+}
+
+enum StopReason {
+    STOP_REASON_UNKNOWN = 0;
+    STOP_DURATION = 1;       // The requested duration elapsed.
+    STOP_NO_SUPPLY = 2;      // VPP_INPUT is missing or out of range.
+    STOP_SENSOR_FAILED = 3;  // An INA226 stopped answering.
+    STOP_RANGE_FAULT = 4;    // The range latches did not do what was asked.
+}
+
+// EVT_POWER_STOPPED: the device stopped measuring on its own.
+message Stopped {
+    StopReason reason = 1;
+    uint32 samples = 2;
+    uint32 dropped_frames = 3;
+}

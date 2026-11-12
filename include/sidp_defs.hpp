@@ -40,8 +40,8 @@ namespace sidp
         EVT_STOPPED = 0x0080,
         EVT_TARGET_LOST = 0x0081,
 
-        // Management service (docs/sidp-management.md). Payloads are
-        // protobuf messages from proto/manage.proto, except ASSET_WRITE.
+        // Management service. Payloads are protobuf messages from
+        // proto/manage.proto, except ASSET_WRITE.
         OP_DEVICE_INFO = 0x0100,
         OP_SET_TIME = 0x0101,
 
@@ -56,6 +56,14 @@ namespace sidp
 
         OP_LOG_READ = 0x0130,
         OP_LOG_ACK = 0x0131,
+
+        // Power service (docs/sidp-power.md). Payloads are protobuf messages from
+        // proto/power.proto, except POWER_DATA, which is power_data_t below.
+        OP_POWER_INFO = 0x0200,
+        OP_POWER_START = 0x0201,
+        OP_POWER_STOP = 0x0202,
+        OP_POWER_DATA = 0x0210, // KIND_LOG_STREAM: expendable, dropped when the queue is full
+        EVT_POWER_STOPPED = 0x0220,
     };
 
     /** @brief First opcode of the management service; lower opcodes are debug. */
@@ -534,6 +542,46 @@ namespace sidp
         std::uint8_t data[];
     };
 
+    /** @brief Current range of a power run: which shunt it was measured on. Matches si.power.Range. */
+    enum power_range_t : std::uint8_t {
+        POWER_RANGE_LOW = 0,
+        POWER_RANGE_MID = 1,
+        POWER_RANGE_HIGH = 2,
+    };
+
+    inline constexpr std::uint8_t POWER_RANGE_COUNT = 3;
+
+    enum power_encoding_t : std::uint8_t {
+        POWER_ENCODING_RAW = 0, // count x power_raw_sample_t
+    };
+
+    /** @brief OP_POWER_DATA payload prefix; run_count power_run_t follow. */
+    struct __attribute__((packed)) power_data_t {
+        std::uint32_t seq; // +1 per frame; a gap means frames were dropped
+        std::uint64_t t_us; // Device clock (esp_timer); run times are offsets from it
+        std::uint16_t run_count;
+        std::uint16_t reserved;
+    };
+
+    /**
+     * @brief Back-to-back conversions in one range, evenly spaced from
+     * t_first_us to t_last_us. count samples follow, as set by encoding.
+     */
+    struct __attribute__((packed)) power_run_t {
+        power_range_t range;
+        power_encoding_t encoding;
+        std::uint16_t count;
+        std::uint16_t settling; // The first settling samples follow a step down
+        std::uint16_t reserved;
+        std::uint32_t t_first_us; // End of the first conversion
+        std::uint32_t t_last_us;  // End of the last conversion
+    };
+
+    struct __attribute__((packed)) power_raw_sample_t {
+        std::int16_t shunt; // INA226 shunt voltage register
+        std::uint16_t bus;  // INA226 bus voltage register: VPP_INPUT
+    };
+
     static_assert(std::endian::native == std::endian::little, "SIDP v1 requires a little-endian host");
     static_assert(sizeof(msg_header_t) == 12, "SIDP message header must be 12 bytes");
     static_assert(sizeof(response_prefix_t) == 4, "SIDP response prefix must be 4 bytes");
@@ -563,5 +611,8 @@ namespace sidp
     static_assert(sizeof(log_data_t) == 4, "SIDP log-data prefix must be 4 bytes");
     static_assert(sizeof(attach_gdb_stub_request_t) == 12, "SIDP attach-GDB-stub request must be 12 bytes");
     static_assert(sizeof(asset_write_request_t) == 4, "SIDP asset-write request prefix must be 4 bytes");
+    static_assert(sizeof(power_data_t) == 16, "SIDP power-data prefix must be 16 bytes");
+    static_assert(sizeof(power_run_t) == 16, "SIDP power run prefix must be 16 bytes");
+    static_assert(sizeof(power_raw_sample_t) == 4, "SIDP raw power sample must be 4 bytes");
 
 }

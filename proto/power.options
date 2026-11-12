@@ -1,0 +1,4 @@
+# nanopb limits for the device. sidp-agent enforces the same limits.
+si.power.PowerInfo.ranges           max_count:3
+si.power.PowerInfo.conversion_us    max_count:8
+si.power.PowerInfo.averages         max_count:8

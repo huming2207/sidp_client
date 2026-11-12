@@ -55,7 +55,7 @@ typedef struct _si_manage_DeviceInfo {
     uint32_t storage_free_kb;
     uint64_t log_newest_id; /* Newest production log entry; 0 when empty. */
     uint64_t log_acked_id; /* Entries up to this ID have been collected. */
-    bool log_full; /* Runs are refused until the log is collected. */
+    bool log_full; /* Runs are refused: the log needs collecting, or a log write failed (until restart). */
 } si_manage_DeviceInfo;
 
 /* Sets the device clock for this boot; the first request after boot wins. */
