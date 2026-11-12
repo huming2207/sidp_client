@@ -112,6 +112,24 @@ power_run_t    ...
   (int16) and the `VPP_INPUT` bus register (uint16). A delta encoding would get
   a new `encoding` value.
 
+## Damaged frames
+
+A host drops any frame that fails its CRC, size or version check and keeps the
+connection, as SIDP requires. For data frames the `seq` jump shows what was
+lost. Rev 8 firmware sends roughly one damaged POWER_DATA frame per 1400 at a
+588 µs sample period, more at faster settings; the cause on the device is not
+found.
+
+## Firmware behaviour (Rev 8)
+
+Not part of the wire contract, but useful when reading data:
+
+- The INA226s convert continuously, never triggered, so there is no dead time.
+- The I2C bus runs at 1 MHz (above the parts' rating; verified on one board).
+- Comparators move the range up in hardware within about a microsecond. The
+  firmware steps down when the average of 8 samples is below 85% of the next
+  range's lowest possible trip current, and not within 200 ms of an up-trip.
+
 ## Debugging and programming
 
 Measurement runs on its own core and I2C bus, so it neither blocks nor is
