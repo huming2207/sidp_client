@@ -175,6 +175,7 @@ typedef struct _si_manage_NetStatus {
     int32_t rssi; /* dBm while on WiFi; 0 otherwise. */
     uint32_t wifi_reason; /* Last WiFi disconnect reason (wifi_err_reason_t); 0 if none. */
     bool network_session; /* SIDP is being served over the network now. */
+    char device_id[13]; /* Factory WiFi MAC, 12 hex digits: names the device to the agent. */
 } si_manage_NetStatus;
 
 
@@ -250,7 +251,7 @@ extern "C" {
 #define si_manage_LogReadResponse_init_default   {{{NULL}, NULL}}
 #define si_manage_LogAckRequest_init_default     {0}
 #define si_manage_NetConfig_init_default         {0, "", "", "", 0, 0, {0, {0}}, {0, {0}}, 0, 0}
-#define si_manage_NetStatus_init_default         {_si_manage_NetState_MIN, "", 0, 0, 0}
+#define si_manage_NetStatus_init_default         {_si_manage_NetState_MIN, "", 0, 0, 0, ""}
 #define si_manage_DeviceInfo_init_zero           {"", "", 0, 0, 0, 0, 0}
 #define si_manage_SetTimeRequest_init_zero       {0}
 #define si_manage_AssetBeginRequest_init_zero    {"", 0, {0}}
@@ -267,7 +268,7 @@ extern "C" {
 #define si_manage_LogReadResponse_init_zero      {{{NULL}, NULL}}
 #define si_manage_LogAckRequest_init_zero        {0}
 #define si_manage_NetConfig_init_zero            {0, "", "", "", 0, 0, {0, {0}}, {0, {0}}, 0, 0}
-#define si_manage_NetStatus_init_zero            {_si_manage_NetState_MIN, "", 0, 0, 0}
+#define si_manage_NetStatus_init_zero            {_si_manage_NetState_MIN, "", 0, 0, 0, ""}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define si_manage_DeviceInfo_serial_tag          1
@@ -327,6 +328,7 @@ extern "C" {
 #define si_manage_NetStatus_rssi_tag             3
 #define si_manage_NetStatus_wifi_reason_tag      4
 #define si_manage_NetStatus_network_session_tag  5
+#define si_manage_NetStatus_device_id_tag        6
 
 /* Struct field encoding specification for nanopb */
 #define si_manage_DeviceInfo_FIELDLIST(X, a) \
@@ -453,7 +455,8 @@ X(a, STATIC,   SINGULAR, UENUM,    state,             1) \
 X(a, STATIC,   SINGULAR, STRING,   ip,                2) \
 X(a, STATIC,   SINGULAR, INT32,    rssi,              3) \
 X(a, STATIC,   SINGULAR, UINT32,   wifi_reason,       4) \
-X(a, STATIC,   SINGULAR, BOOL,     network_session,   5)
+X(a, STATIC,   SINGULAR, BOOL,     network_session,   5) \
+X(a, STATIC,   SINGULAR, STRING,   device_id,         6)
 #define si_manage_NetStatus_CALLBACK NULL
 #define si_manage_NetStatus_DEFAULT NULL
 
@@ -509,7 +512,7 @@ extern const pb_msgdesc_t si_manage_NetStatus_msg;
 #define si_manage_LogEntry_size                  166
 #define si_manage_LogReadRequest_size            11
 #define si_manage_NetConfig_size                 661
-#define si_manage_NetStatus_size                 38
+#define si_manage_NetStatus_size                 52
 #define si_manage_RunRecord_size                 98
 #define si_manage_RunResult_size                 16
 #define si_manage_SetTimeRequest_size            11

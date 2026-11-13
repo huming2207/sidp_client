@@ -15,3 +15,4 @@ si.manage.NetConfig.server_url          max_size:128
 si.manage.NetConfig.password_salt       max_size:32
 si.manage.NetConfig.password_verifier   max_size:384
 si.manage.NetStatus.ip                  max_size:16
+si.manage.NetStatus.device_id           max_size:13

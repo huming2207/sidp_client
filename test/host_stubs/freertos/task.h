@@ -16,5 +16,6 @@ inline BaseType_t xTaskCreateWithCaps(void (*fn)(void *), const char *name, std:
 }
 // Mirrors freertos/idf_additions.h: vTaskDeleteWithCaps().
 inline void vTaskDeleteWithCaps(TaskHandle_t) {}
+inline TaskHandle_t xTaskGetCurrentTaskHandle() { return nullptr; }
 inline void xTaskNotifyGive(TaskHandle_t) {}
 inline unsigned ulTaskNotifyTake(int, TickType_t ticks) { vTaskDelay(ticks); return 0; }

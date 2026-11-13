@@ -75,6 +75,7 @@ namespace sidp
         *len_out = 0;
         const TickType_t start = xTaskGetTickCount();
         const TickType_t limit = timeout_to_ticks(timeout_ms);
+        rx_reader.store(xTaskGetCurrentTaskHandle());
         for (;;) {
             {
                 const queue_guard lock(queue_mutex);
@@ -89,8 +90,9 @@ namespace sidp
             }
             const TickType_t elapsed = xTaskGetTickCount() - start;
             if (timeout_ms != WAIT_FOREVER && elapsed >= limit) return ESP_ERR_TIMEOUT;
+            // deliver_packet() wakes this at once; the slice only re-checks the state.
             const TickType_t slice = timeout_to_ticks(POLL_MS);
-            vTaskDelay(timeout_ms == WAIT_FOREVER || limit - elapsed > slice ? slice : limit - elapsed);
+            ulTaskNotifyTake(pdTRUE, timeout_ms == WAIT_FOREVER || limit - elapsed > slice ? slice : limit - elapsed);
         }
     }
 
@@ -151,6 +153,7 @@ namespace sidp
             return;
         }
         ++rx_queued;
+        if (TaskHandle_t reader = rx_reader.load()) xTaskNotifyGive(reader);
     }
 
     TickType_t packet_queue_transport::timeout_to_ticks(std::uint32_t timeout_ms) noexcept

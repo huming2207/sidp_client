@@ -178,4 +178,5 @@ message NetStatus {
     int32 rssi = 3;           // dBm while on WiFi; 0 otherwise.
     uint32 wifi_reason = 4;   // Last WiFi disconnect reason (wifi_err_reason_t); 0 if none.
     bool network_session = 5; // SIDP is being served over the network now.
+    string device_id = 6;     // Factory WiFi MAC, 12 hex digits: names the device to the agent.
 }

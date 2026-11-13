@@ -132,6 +132,8 @@ namespace sidp
         RingbufHandle_t tx_ring = nullptr;
         RingbufHandle_t log_ring = nullptr;
         TaskHandle_t tx_task_handle = nullptr;
+        // The task waiting in start_read(); a received request wakes it at once.
+        std::atomic<TaskHandle_t> rx_reader{nullptr};
         std::uint64_t link_serial = 0;
         std::uint64_t accepted_link_serial = 0;
         std::size_t rx_borrowed = 0;
