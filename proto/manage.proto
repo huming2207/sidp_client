@@ -145,7 +145,7 @@ message LogAckRequest {
 
 // ---- Network (0x0140 and up) ----
 // Settings are stored in NVS and used from the next boot. NET_CONFIG_SET is
-// accepted over USB only.
+// accepted over USB, and over the network after the login.
 //
 // Over the network, every request other than LOGIN (0x0150) is refused with
 // STATUS_UNAUTHORIZED until the login succeeds. LOGIN carries the session

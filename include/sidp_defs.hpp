@@ -58,7 +58,7 @@ namespace sidp
         OP_LOG_ACK = 0x0131,
 
         OP_NET_CONFIG_GET = 0x0140,
-        OP_NET_CONFIG_SET = 0x0141, // USB only
+        OP_NET_CONFIG_SET = 0x0141,
         OP_NET_STATUS = 0x0142,
 
         OP_LOGIN = 0x0150, // Network only: protocomm Security 2 handshake
