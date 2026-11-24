@@ -142,6 +142,7 @@ message Script {
     string asset = 1;           // Asset name: the device reads /data/<asset>.
     bytes sha256 = 2;           // Optional: when set, the device refuses any other file.
     uint32 hook_timeout_ms = 3; // Per hook; 0 for the firmware default.
+    bool network = 4;           // The script may use esp:ws; needs firmware built with it.
 }
 
 message Job {

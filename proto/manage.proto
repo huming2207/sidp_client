@@ -120,6 +120,7 @@ message RunRecord {
     int32 error_code = 5; // ESP-IDF esp_err_t of a failed run; 0 otherwise.
     bytes script_sha256 = 6; // SHA-256 of the script the run loaded; empty without one.
     bool script_pinned = 7;  // The job pinned that hash (Script.sha256).
+    string results_json = 8; // JSON object the script built with log.record()/log.check(); empty without.
 }
 
 message LogReadRequest {

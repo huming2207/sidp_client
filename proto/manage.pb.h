@@ -131,13 +131,14 @@ typedef struct _si_manage_RunRecord {
     int32_t error_code; /* ESP-IDF esp_err_t of a failed run; 0 otherwise. */
     si_manage_RunRecord_script_sha256_t script_sha256; /* SHA-256 of the script the run loaded; empty without one. */
     bool script_pinned; /* The job pinned that hash (Script.sha256). */
+    char results_json[360]; /* JSON object the script built with log.record()/log.check(); empty without. */
 } si_manage_RunRecord;
 
 typedef struct _si_manage_LogReadRequest {
     uint64_t after_id; /* Returns entries with larger IDs, oldest first. */
 } si_manage_LogReadRequest;
 
-typedef PB_BYTES_ARRAY_T(128) si_manage_LogEntry_record_t;
+typedef PB_BYTES_ARRAY_T(512) si_manage_LogEntry_record_t;
 typedef struct _si_manage_LogEntry {
     uint64_t id;
     uint64_t uptime_us; /* Since the boot the entry was written in. */
@@ -248,7 +249,7 @@ extern "C" {
 #define si_manage_JobRunOnceResponse_init_default {0}
 #define si_manage_JobCancelRequest_init_default  {0}
 #define si_manage_BootRecord_init_default        {0}
-#define si_manage_RunRecord_init_default         {false, si_manage_RunResult_init_default, _si_manage_Trigger_MIN, "", {0}, 0, {0, {0}}, 0}
+#define si_manage_RunRecord_init_default         {false, si_manage_RunResult_init_default, _si_manage_Trigger_MIN, "", {0}, 0, {0, {0}}, 0, ""}
 #define si_manage_LogReadRequest_init_default    {0}
 #define si_manage_LogEntry_init_default          {0, 0, 0, _si_manage_LogEntryType_MIN, {0, {0}}}
 #define si_manage_LogReadResponse_init_default   {{{NULL}, NULL}}
@@ -265,7 +266,7 @@ extern "C" {
 #define si_manage_JobRunOnceResponse_init_zero   {0}
 #define si_manage_JobCancelRequest_init_zero     {0}
 #define si_manage_BootRecord_init_zero           {0}
-#define si_manage_RunRecord_init_zero            {false, si_manage_RunResult_init_zero, _si_manage_Trigger_MIN, "", {0}, 0, {0, {0}}, 0}
+#define si_manage_RunRecord_init_zero            {false, si_manage_RunResult_init_zero, _si_manage_Trigger_MIN, "", {0}, 0, {0, {0}}, 0, ""}
 #define si_manage_LogReadRequest_init_zero       {0}
 #define si_manage_LogEntry_init_zero             {0, 0, 0, _si_manage_LogEntryType_MIN, {0, {0}}}
 #define si_manage_LogReadResponse_init_zero      {{{NULL}, NULL}}
@@ -310,6 +311,7 @@ extern "C" {
 #define si_manage_RunRecord_error_code_tag       5
 #define si_manage_RunRecord_script_sha256_tag    6
 #define si_manage_RunRecord_script_pinned_tag    7
+#define si_manage_RunRecord_results_json_tag     8
 #define si_manage_LogReadRequest_after_id_tag    1
 #define si_manage_LogEntry_id_tag                1
 #define si_manage_LogEntry_uptime_us_tag         2
@@ -413,7 +415,8 @@ X(a, STATIC,   SINGULAR, STRING,   job_name,          3) \
 X(a, STATIC,   SINGULAR, FIXED_LENGTH_BYTES, job_sha256,        4) \
 X(a, STATIC,   SINGULAR, INT32,    error_code,        5) \
 X(a, STATIC,   SINGULAR, BYTES,    script_sha256,     6) \
-X(a, STATIC,   SINGULAR, BOOL,     script_pinned,     7)
+X(a, STATIC,   SINGULAR, BOOL,     script_pinned,     7) \
+X(a, STATIC,   SINGULAR, STRING,   results_json,      8)
 #define si_manage_RunRecord_CALLBACK NULL
 #define si_manage_RunRecord_DEFAULT NULL
 #define si_manage_RunRecord_result_MSGTYPE si_manage_RunResult
@@ -516,11 +519,11 @@ extern const pb_msgdesc_t si_manage_NetStatus_msg;
 #define si_manage_JobSetRequest_size             36
 #define si_manage_JobStatus_size                 97
 #define si_manage_LogAckRequest_size             11
-#define si_manage_LogEntry_size                  166
+#define si_manage_LogEntry_size                  550
 #define si_manage_LogReadRequest_size            11
 #define si_manage_NetConfig_size                 661
 #define si_manage_NetStatus_size                 52
-#define si_manage_RunRecord_size                 134
+#define si_manage_RunRecord_size                 496
 #define si_manage_RunResult_size                 16
 #define si_manage_SetTimeRequest_size            11
 
