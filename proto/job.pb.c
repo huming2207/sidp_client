@@ -51,6 +51,9 @@ PB_BIND(si_job_Step, si_job_Step, AUTO)
 PB_BIND(si_job_Procedure, si_job_Procedure, 2)
 
 
+PB_BIND(si_job_Script, si_job_Script, AUTO)
+
+
 PB_BIND(si_job_Job, si_job_Job, 2)
 
 

@@ -118,6 +118,8 @@ message RunRecord {
     string job_name = 3;
     bytes job_sha256 = 4;
     int32 error_code = 5; // ESP-IDF esp_err_t of a failed run; 0 otherwise.
+    bytes script_sha256 = 6; // SHA-256 of the script the run loaded; empty without one.
+    bool script_pinned = 7;  // The job pinned that hash (Script.sha256).
 }
 
 message LogReadRequest {

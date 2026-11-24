@@ -135,10 +135,20 @@ message Procedure {
     repeated Step steps = 1;
 }
 
+// A JS script whose preProgram/postProgram hooks run instead of the pre/post
+// procedures. It's a bytecode container (esp-quickjs-ng tools/qjs_esp_bc.py)
+// uploaded as an asset; a job has either a script or procedures.
+message Script {
+    string asset = 1;           // Asset name: the device reads /data/<asset>.
+    bytes sha256 = 2;           // Optional: when set, the device refuses any other file.
+    uint32 hook_timeout_ms = 3; // Per hook; 0 for the firmware default.
+}
+
 message Job {
     SchemaVersion schema_version = 1;
     Target target = 2;
     Procedure pre_program = 3;
     Procedure post_program = 4;
     string name = 5; // Shown by JOB_GET; defaults to the variant name.
+    Script script = 6;
 }

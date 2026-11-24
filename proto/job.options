@@ -12,3 +12,5 @@ si.job.Procedure.steps              max_count:96
 si.job.CortexM.firmware_sha256       max_size:32 fixed_length:true
 si.job.Esp32Image.sha256            max_size:32 fixed_length:true
 si.job.Job.name                     max_size:32
+si.job.Script.asset                 max_size:32
+si.job.Script.sha256                max_size:32
