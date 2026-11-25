@@ -131,6 +131,11 @@ message TrapConfig {
     Permissions permissions = 3;
     bool connect_under_reset = 4;
     uint32 incidents_per_hour = 5; // Incidents recorded per hour, the rest only counted; 0 for the device's default.
+    // A watch firing more than 10 times a second is throttled: the core is held
+    // and its handler isn't called. In a trap the hold lasts this long, then the
+    // trap lets the core run. 0 for 10 s; 0xFFFFFFFF holds it until something
+    // resumes it (a session after disarming, GDB, a reset).
+    uint32 throttle_hold_ms = 6;
 }
 
 // Replaces the armed trap. The target must answer and the module's top level

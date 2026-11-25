@@ -139,11 +139,17 @@ typedef struct _si_agent_TrapConfig {
     si_agent_Permissions permissions;
     bool connect_under_reset;
     uint32_t incidents_per_hour; /* Incidents recorded per hour, the rest only counted; 0 for the device's default. */
+    /* A watch firing more than 10 times a second is throttled: the core is held
+ and its handler isn't called. In a trap the hold lasts this long, then the
+ trap lets the core run. 0 for 10 s; 0xFFFFFFFF holds it until something
+ resumes it (a session after disarming, GDB, a reset). */
+    uint32_t throttle_hold_ms;
 } si_agent_TrapConfig;
 
 typedef PB_BYTES_ARRAY_T(7936) si_agent_ArmRequest_bytecode_t;
-/* The target must answer and the module's top level must finish (or still be
- going after timeout_ms) for the trap to be armed; only then is it saved. */
+/* Replaces the armed trap. The target must answer and the module's top level
+ must finish (or still be going after timeout_ms) for the new one to be
+ armed and saved; otherwise no trap is armed. */
 typedef struct _si_agent_ArmRequest {
     bool has_config;
     si_agent_TrapConfig config;
@@ -268,7 +274,7 @@ extern "C" {
 #define si_agent_EventNotify_init_default        {0}
 #define si_agent_CaptureReadRequest_init_default {0, 0}
 #define si_agent_CaptureReadResponse_init_default {0, {0, {0}}}
-#define si_agent_TrapConfig_init_default         {"", _si_agent_TrapMode_MIN, false, si_agent_Permissions_init_default, 0, 0}
+#define si_agent_TrapConfig_init_default         {"", _si_agent_TrapMode_MIN, false, si_agent_Permissions_init_default, 0, 0, 0}
 #define si_agent_ArmRequest_init_default         {false, si_agent_TrapConfig_init_default, {0, {0}}, 0, 0}
 #define si_agent_TrapStatus_init_default         {false, si_agent_TrapConfig_init_default, _si_agent_TrapState_MIN, "", {0, {0}}, 0, 0, 0, 0, 0, false, si_agent_ScriptResult_init_default}
 #define si_agent_IncidentListRequest_init_default {0}
@@ -290,7 +296,7 @@ extern "C" {
 #define si_agent_EventNotify_init_zero           {0}
 #define si_agent_CaptureReadRequest_init_zero    {0, 0}
 #define si_agent_CaptureReadResponse_init_zero   {0, {0, {0}}}
-#define si_agent_TrapConfig_init_zero            {"", _si_agent_TrapMode_MIN, false, si_agent_Permissions_init_zero, 0, 0}
+#define si_agent_TrapConfig_init_zero            {"", _si_agent_TrapMode_MIN, false, si_agent_Permissions_init_zero, 0, 0, 0}
 #define si_agent_ArmRequest_init_zero            {false, si_agent_TrapConfig_init_zero, {0, {0}}, 0, 0}
 #define si_agent_TrapStatus_init_zero            {false, si_agent_TrapConfig_init_zero, _si_agent_TrapState_MIN, "", {0, {0}}, 0, 0, 0, 0, 0, false, si_agent_ScriptResult_init_zero}
 #define si_agent_IncidentListRequest_init_zero   {0}
@@ -347,6 +353,7 @@ extern "C" {
 #define si_agent_TrapConfig_permissions_tag      3
 #define si_agent_TrapConfig_connect_under_reset_tag 4
 #define si_agent_TrapConfig_incidents_per_hour_tag 5
+#define si_agent_TrapConfig_throttle_hold_ms_tag 6
 #define si_agent_ArmRequest_config_tag           1
 #define si_agent_ArmRequest_bytecode_tag         2
 #define si_agent_ArmRequest_staged_tag           3
@@ -480,7 +487,8 @@ X(a, STATIC,   SINGULAR, STRING,   name,              1) \
 X(a, STATIC,   SINGULAR, UENUM,    mode,              2) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  permissions,       3) \
 X(a, STATIC,   SINGULAR, BOOL,     connect_under_reset,   4) \
-X(a, STATIC,   SINGULAR, UINT32,   incidents_per_hour,   5)
+X(a, STATIC,   SINGULAR, UINT32,   incidents_per_hour,   5) \
+X(a, STATIC,   SINGULAR, UINT32,   throttle_hold_ms,   6)
 #define si_agent_TrapConfig_CALLBACK NULL
 #define si_agent_TrapConfig_DEFAULT NULL
 #define si_agent_TrapConfig_permissions_MSGTYPE si_agent_Permissions
@@ -600,7 +608,7 @@ extern const pb_msgdesc_t si_agent_IncidentDeleteRequest_msg;
 
 /* Maximum encoded size of messages (where known) */
 #define SI_AGENT_AGENT_PB_H_MAX_SIZE             si_agent_ArmRequest_size
-#define si_agent_ArmRequest_size                 7992
+#define si_agent_ArmRequest_size                 7998
 #define si_agent_CaptureReadRequest_size         12
 #define si_agent_CaptureReadResponse_size        4105
 #define si_agent_EvalRequest_size                7945
@@ -619,8 +627,8 @@ extern const pb_msgdesc_t si_agent_IncidentDeleteRequest_msg;
 #define si_agent_RunRequest_size                 7947
 #define si_agent_ScriptResult_size               5322
 #define si_agent_SessionInfo_size                53
-#define si_agent_TrapConfig_size                 43
-#define si_agent_TrapStatus_size                 5533
+#define si_agent_TrapConfig_size                 49
+#define si_agent_TrapStatus_size                 5539
 #define si_agent_UploadRequest_size              7951
 
 #ifdef __cplusplus
