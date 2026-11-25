@@ -108,3 +108,84 @@ message CaptureReadResponse {
     uint32 total = 1; // Capture length; read until offset reaches it.
     bytes data = 2;
 }
+
+// Traps (TRAP_ARM and on): a module the device keeps running with no host
+// connected, through disconnects and restarts, recording incidents to flash.
+
+enum TrapMode {
+    TRAP_MODE_YIELD = 0;     // A debugger attaching or a programming run pauses the trap; it restarts after.
+    TRAP_MODE_EXCLUSIVE = 1; // They are refused while the trap is armed.
+}
+
+enum TrapState {
+    TRAP_STATE_DISARMED = 0;
+    TRAP_STATE_RUNNING = 1;  // Holds the target, the module is running.
+    TRAP_STATE_WAITING = 2;  // Retrying: no target, no job, or the target didn't answer; `note` says.
+    TRAP_STATE_PAUSED = 3;   // Yielded to a debugger or a programming run.
+    TRAP_STATE_FAILED = 4;   // Won't restart until armed again or the device restarts; `note` says why.
+}
+
+message TrapConfig {
+    string name = 1;
+    TrapMode mode = 2;
+    Permissions permissions = 3;
+    bool connect_under_reset = 4;
+    uint32 incidents_per_hour = 5; // Incidents recorded per hour, the rest only counted; 0 for the device's default.
+}
+
+// Replaces the armed trap. The target must answer and the module's top level
+// must finish (or still be going after timeout_ms) for the new one to be
+// armed and saved; otherwise no trap is armed.
+message ArmRequest {
+    TrapConfig config = 1;
+    bytes bytecode = 2;    // Container with one ES module.
+    bool staged = 3;       // The module sent with SCRIPT_UPLOAD instead.
+    uint32 timeout_ms = 4; // For the top level; 0 for 5 s.
+}
+
+message TrapStatus {
+    TrapConfig config = 1;
+    TrapState state = 2;
+    string note = 3;
+    bytes module_sha256 = 4;
+    uint32 starts = 5;            // Times the module started since this device boot.
+    uint32 incidents = 6;         // Incident files on the device, from any trap.
+    uint32 newest_incident = 7;
+    uint32 suppressed = 8;        // Incidents over incidents_per_hour since this device boot.
+    uint32 newest_event_seq = 9;
+    ScriptResult first_result = 10; // TRAP_ARM only: how the top level went.
+}
+
+message IncidentListRequest {
+    uint32 after_id = 1; // Returns incidents with larger ids, oldest first.
+}
+
+message IncidentInfo {
+    uint32 id = 1;
+    uint32 size = 2;
+    uint32 kind = 3;      // 0 a watch fired, 1 agent.incident().
+    string name = 4;      // The watch's or the incident's name.
+    string trap = 5;
+    uint32 boot = 6;      // Device boot count when recorded.
+    uint64 uptime_us = 7;
+    uint64 utc_ms = 8;    // 0 when the device didn't know the time.
+}
+
+message IncidentListResponse {
+    repeated IncidentInfo incidents = 1;
+    bool more = 2;
+}
+
+message IncidentReadRequest {
+    uint32 id = 1;
+    uint32 offset = 2;
+}
+
+message IncidentReadResponse {
+    uint32 total = 1;
+    bytes data = 2;
+}
+
+message IncidentDeleteRequest {
+    uint32 id = 1; // 0 deletes them all.
+}

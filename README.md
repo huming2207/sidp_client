@@ -25,7 +25,7 @@ but require hardware validation.
 - `nanopb/`: vendored nanopb 0.4.9.2 runtime.
 - `docs/sidp-power.md`: the power service, opcodes 0x0200 and up.
 - `docs/sidp-agent.md`: the agent service, opcodes 0x0300 and up: scripts,
-  watches, events and captures for LLM agents.
+  watches, events, captures, traps and incidents for LLM agents.
 - `docs/integration.md`: connection lifecycle and cleanup wiring.
 
 ## Next milestone

@@ -45,6 +45,37 @@ PB_BIND(si_agent_CaptureReadRequest, si_agent_CaptureReadRequest, AUTO)
 PB_BIND(si_agent_CaptureReadResponse, si_agent_CaptureReadResponse, 4)
 
 
+PB_BIND(si_agent_TrapConfig, si_agent_TrapConfig, AUTO)
+
+
+PB_BIND(si_agent_ArmRequest, si_agent_ArmRequest, 4)
+
+
+PB_BIND(si_agent_TrapStatus, si_agent_TrapStatus, 4)
+
+
+PB_BIND(si_agent_IncidentListRequest, si_agent_IncidentListRequest, AUTO)
+
+
+PB_BIND(si_agent_IncidentInfo, si_agent_IncidentInfo, AUTO)
+
+
+PB_BIND(si_agent_IncidentListResponse, si_agent_IncidentListResponse, 2)
+
+
+PB_BIND(si_agent_IncidentReadRequest, si_agent_IncidentReadRequest, AUTO)
+
+
+PB_BIND(si_agent_IncidentReadResponse, si_agent_IncidentReadResponse, 4)
+
+
+PB_BIND(si_agent_IncidentDeleteRequest, si_agent_IncidentDeleteRequest, AUTO)
+
+
+
+
+
+
 
 
 

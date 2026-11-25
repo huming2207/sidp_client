@@ -10,3 +10,11 @@ si.agent.Event.kind                     max_size:12
 si.agent.Event.json                     max_size:768
 si.agent.EventReadResponse.events       max_count:8
 si.agent.CaptureReadResponse.data       max_size:4096
+si.agent.TrapConfig.name                max_size:24
+si.agent.ArmRequest.bytecode            max_size:7936
+si.agent.TrapStatus.note                max_size:96
+si.agent.TrapStatus.module_sha256       max_size:32
+si.agent.IncidentInfo.name              max_size:24
+si.agent.IncidentInfo.trap              max_size:24
+si.agent.IncidentListResponse.incidents max_count:16
+si.agent.IncidentReadResponse.data      max_size:4096

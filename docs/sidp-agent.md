@@ -34,6 +34,12 @@ are removed. Breakpoints a script set through the FPB are cleared too.
 | 0x0313 | Request | `SCRIPT_UPLOAD` | `UploadRequest` | empty |
 | 0x0320 | Request | `EVENT_READ` | `EventReadRequest` | `EventReadResponse` |
 | 0x0321 | Request | `CAPTURE_READ` | `CaptureReadRequest` | `CaptureReadResponse` |
+| 0x0330 | Request | `TRAP_ARM` | `ArmRequest` | `TrapStatus` |
+| 0x0331 | Request | `TRAP_DISARM` | empty | empty |
+| 0x0332 | Request | `TRAP_STATUS` | empty | `TrapStatus` |
+| 0x0340 | Request | `INCIDENT_LIST` | `IncidentListRequest` | `IncidentListResponse` |
+| 0x0341 | Request | `INCIDENT_READ` | `IncidentReadRequest` | `IncidentReadResponse` |
+| 0x0342 | Request | `INCIDENT_DELETE` | `IncidentDeleteRequest` | empty |
 | 0x0380 | Log stream | `AGENT_EVENT` | — | `EventNotify` |
 
 | Status | Meaning |
@@ -41,7 +47,8 @@ are removed. Breakpoints a script set through the FPB are cleared too.
 | `STATUS_BUSY` | `AGENT_OPEN` while a debugger, a programming run or another session has the target. |
 | `STATUS_SWD_ERROR` | `AGENT_OPEN` could not connect to the target. |
 | `STATUS_NEEDS_CORTEX_M` | `AGENT_OPEN` without a Cortex-M job: the job describes the target (memory map, flash algorithm). |
-| `STATUS_NO_SESSION` | Anything but `AGENT_OPEN` without an open session. |
+| `STATUS_NO_SESSION` | A session request without an open session. |
+| `STATUS_TRAP_ARMED` | `AGENT_OPEN` while a trap is armed; a programming run while an exclusive trap holds the target. |
 | `STATUS_NO_SCRIPTS` | The firmware can't run scripts now: no PSRAM, or the script engine failed (see the device log). |
 | `STATUS_INVALID_ARGUMENT` | A malformed message, a bad upload piece, or a capture that is gone. |
 | `STATUS_UNSUPPORTED` | Firmware built without scripts. |
@@ -129,3 +136,53 @@ section  u8 type, u8 sub, u16 0, u32 length, then length bytes padded to 4
 Unknown sections are skipped by their length. Registers are only read while
 the core is halted; the stack starts at the stacked frame's SP (MSP or PSP,
 from EXC_RETURN) when the core stopped in a handler.
+
+## Traps
+
+A trap is a module the device keeps running with no host connected: through
+disconnects, and from its flash after a restart. `TRAP_ARM` replaces the
+armed trap, claims the target, and runs the module; only if its top level
+finishes (or is still going after `timeout_ms`) is the trap armed and saved.
+`ArmRequest.staged` takes the module from `SCRIPT_UPLOAD`, which needs no
+session. The module gets `TrapConfig.permissions`.
+
+The trap restarts the module from the top when the device restarts, when the
+runtime ended by itself, and when the target stopped answering for 5 s; it
+retries with a growing delay up to a minute while the target doesn't answer.
+It gives up (`TRAP_STATE_FAILED`) when the module failed five times in a row
+(its top level threw, or its runtime ended), until it is armed again or the
+device restarts; and when the device crashed while it ran, until the device
+restarts.
+
+While a trap is armed `AGENT_OPEN` answers `STATUS_TRAP_ARMED`; `TRAP_STATUS`,
+`EVENT_READ`, `CAPTURE_READ` and the incident requests work. In
+`TRAP_MODE_YIELD` a debugger's `ATTACH` or a programming run pauses the trap
+(`TRAP_STATE_PAUSED`): it lets go of the target as it is and starts again 3 s
+after they finished. In `TRAP_MODE_EXCLUSIVE` they are refused. `TRAP_DISARM`
+stops the trap and leaves the target as it is.
+
+## Incidents
+
+In a trap, each watch firing and each `agent.incident(name, data)` writes an
+incident file, unless `incidents_per_hour` ran out; those are counted in
+`TrapStatus.suppressed`. The device keeps a configured number of incidents in
+a configured space (Kconfig `SI_AGENT_INCIDENTS_MAX`, `SI_AGENT_INCIDENTS_KB`)
+and deletes the oldest first. IDs only grow, across restarts.
+`INCIDENT_READ` returns a file in pieces of up to 4096 bytes. Little endian:
+
+```text
+header   "SIIN", u8 version (1), u8 kind (0 watch, 1 agent.incident), u16 watch id,
+         u32 id, u32 total length, u32 boot count, u32 0, u64 uptime_us,
+         u64 utc_ms (0: unknown), char name[24], char trap[24], u32 0, u32 0   (96 bytes)
+section  u8 type, u8 0, u16 0, u32 length, then length bytes padded to 4
+  1 CAUSE    JSON: what fired, as the watch event says it
+  2 DATA     JSON from agent.incident() or the handler's { action, data }
+  3 OUTCOME  JSON {action, handler, throttled, note}: what the watch did in the end
+  4 EVENTS   JSON array of the newest events before it: {seq, us, kind, capture, data}
+  5 CAPTURE  the watch's capture record (see Captures)
+```
+
+Sections are appended as they become known, so a file read early may lack
+`DATA` or `OUTCOME`. `utc_ms` comes from the host's `SET_TIME` in the same
+boot.
+

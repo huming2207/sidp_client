@@ -18,6 +18,19 @@ typedef enum _si_agent_SessionEnd {
     si_agent_SessionEnd_SESSION_END_RESET = 2 /* The target is reset and runs. */
 } si_agent_SessionEnd;
 
+typedef enum _si_agent_TrapMode {
+    si_agent_TrapMode_TRAP_MODE_YIELD = 0, /* A debugger attaching or a programming run pauses the trap; it restarts after. */
+    si_agent_TrapMode_TRAP_MODE_EXCLUSIVE = 1 /* They are refused while the trap is armed. */
+} si_agent_TrapMode;
+
+typedef enum _si_agent_TrapState {
+    si_agent_TrapState_TRAP_STATE_DISARMED = 0,
+    si_agent_TrapState_TRAP_STATE_RUNNING = 1, /* Holds the target, the module is running. */
+    si_agent_TrapState_TRAP_STATE_WAITING = 2, /* Retrying: no target, no job, or the target didn't answer; `note` says. */
+    si_agent_TrapState_TRAP_STATE_PAUSED = 3, /* Yielded to a debugger or a programming run. */
+    si_agent_TrapState_TRAP_STATE_FAILED = 4 /* Won't restart until armed again or the device restarts; `note` says why. */
+} si_agent_TrapState;
+
 typedef enum _si_agent_ScriptResult_Outcome {
     si_agent_ScriptResult_Outcome_OUTCOME_OK = 0, /* Eval: `value` is the result as JSON. Run: the top level finished. */
     si_agent_ScriptResult_Outcome_OUTCOME_ERROR = 1, /* It threw: `error` and `stack`. */
@@ -119,6 +132,78 @@ typedef struct _si_agent_CaptureReadResponse {
     si_agent_CaptureReadResponse_data_t data;
 } si_agent_CaptureReadResponse;
 
+typedef struct _si_agent_TrapConfig {
+    char name[24];
+    si_agent_TrapMode mode;
+    bool has_permissions;
+    si_agent_Permissions permissions;
+    bool connect_under_reset;
+    uint32_t incidents_per_hour; /* Incidents recorded per hour, the rest only counted; 0 for the device's default. */
+} si_agent_TrapConfig;
+
+typedef PB_BYTES_ARRAY_T(7936) si_agent_ArmRequest_bytecode_t;
+/* The target must answer and the module's top level must finish (or still be
+ going after timeout_ms) for the trap to be armed; only then is it saved. */
+typedef struct _si_agent_ArmRequest {
+    bool has_config;
+    si_agent_TrapConfig config;
+    si_agent_ArmRequest_bytecode_t bytecode; /* Container with one ES module. */
+    bool staged; /* The module sent with SCRIPT_UPLOAD instead. */
+    uint32_t timeout_ms; /* For the top level; 0 for 5 s. */
+} si_agent_ArmRequest;
+
+typedef PB_BYTES_ARRAY_T(32) si_agent_TrapStatus_module_sha256_t;
+typedef struct _si_agent_TrapStatus {
+    bool has_config;
+    si_agent_TrapConfig config;
+    si_agent_TrapState state;
+    char note[96];
+    si_agent_TrapStatus_module_sha256_t module_sha256;
+    uint32_t starts; /* Times the module started since this device boot. */
+    uint32_t incidents; /* Incident files on the device, from any trap. */
+    uint32_t newest_incident;
+    uint32_t suppressed; /* Incidents over incidents_per_hour since this device boot. */
+    uint32_t newest_event_seq;
+    bool has_first_result;
+    si_agent_ScriptResult first_result; /* TRAP_ARM only: how the top level went. */
+} si_agent_TrapStatus;
+
+typedef struct _si_agent_IncidentListRequest {
+    uint32_t after_id; /* Returns incidents with larger ids, oldest first. */
+} si_agent_IncidentListRequest;
+
+typedef struct _si_agent_IncidentInfo {
+    uint32_t id;
+    uint32_t size;
+    uint32_t kind; /* 0 a watch fired, 1 agent.incident(). */
+    char name[24]; /* The watch's or the incident's name. */
+    char trap[24];
+    uint32_t boot; /* Device boot count when recorded. */
+    uint64_t uptime_us;
+    uint64_t utc_ms; /* 0 when the device didn't know the time. */
+} si_agent_IncidentInfo;
+
+typedef struct _si_agent_IncidentListResponse {
+    pb_size_t incidents_count;
+    si_agent_IncidentInfo incidents[16];
+    bool more;
+} si_agent_IncidentListResponse;
+
+typedef struct _si_agent_IncidentReadRequest {
+    uint32_t id;
+    uint32_t offset;
+} si_agent_IncidentReadRequest;
+
+typedef PB_BYTES_ARRAY_T(4096) si_agent_IncidentReadResponse_data_t;
+typedef struct _si_agent_IncidentReadResponse {
+    uint32_t total;
+    si_agent_IncidentReadResponse_data_t data;
+} si_agent_IncidentReadResponse;
+
+typedef struct _si_agent_IncidentDeleteRequest {
+    uint32_t id; /* 0 deletes them all. */
+} si_agent_IncidentDeleteRequest;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -128,6 +213,14 @@ extern "C" {
 #define _si_agent_SessionEnd_MIN si_agent_SessionEnd_SESSION_END_AS_IS
 #define _si_agent_SessionEnd_MAX si_agent_SessionEnd_SESSION_END_RESET
 #define _si_agent_SessionEnd_ARRAYSIZE ((si_agent_SessionEnd)(si_agent_SessionEnd_SESSION_END_RESET+1))
+
+#define _si_agent_TrapMode_MIN si_agent_TrapMode_TRAP_MODE_YIELD
+#define _si_agent_TrapMode_MAX si_agent_TrapMode_TRAP_MODE_EXCLUSIVE
+#define _si_agent_TrapMode_ARRAYSIZE ((si_agent_TrapMode)(si_agent_TrapMode_TRAP_MODE_EXCLUSIVE+1))
+
+#define _si_agent_TrapState_MIN si_agent_TrapState_TRAP_STATE_DISARMED
+#define _si_agent_TrapState_MAX si_agent_TrapState_TRAP_STATE_FAILED
+#define _si_agent_TrapState_ARRAYSIZE ((si_agent_TrapState)(si_agent_TrapState_TRAP_STATE_FAILED+1))
 
 #define _si_agent_ScriptResult_Outcome_MIN si_agent_ScriptResult_Outcome_OUTCOME_OK
 #define _si_agent_ScriptResult_Outcome_MAX si_agent_ScriptResult_Outcome_OUTCOME_STOPPED
@@ -142,6 +235,17 @@ extern "C" {
 
 
 #define si_agent_ScriptResult_outcome_ENUMTYPE si_agent_ScriptResult_Outcome
+
+
+
+
+
+
+
+#define si_agent_TrapConfig_mode_ENUMTYPE si_agent_TrapMode
+
+
+#define si_agent_TrapStatus_state_ENUMTYPE si_agent_TrapState
 
 
 
@@ -164,6 +268,15 @@ extern "C" {
 #define si_agent_EventNotify_init_default        {0}
 #define si_agent_CaptureReadRequest_init_default {0, 0}
 #define si_agent_CaptureReadResponse_init_default {0, {0, {0}}}
+#define si_agent_TrapConfig_init_default         {"", _si_agent_TrapMode_MIN, false, si_agent_Permissions_init_default, 0, 0}
+#define si_agent_ArmRequest_init_default         {false, si_agent_TrapConfig_init_default, {0, {0}}, 0, 0}
+#define si_agent_TrapStatus_init_default         {false, si_agent_TrapConfig_init_default, _si_agent_TrapState_MIN, "", {0, {0}}, 0, 0, 0, 0, 0, false, si_agent_ScriptResult_init_default}
+#define si_agent_IncidentListRequest_init_default {0}
+#define si_agent_IncidentInfo_init_default       {0, 0, 0, "", "", 0, 0, 0}
+#define si_agent_IncidentListResponse_init_default {0, {si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default, si_agent_IncidentInfo_init_default}, 0}
+#define si_agent_IncidentReadRequest_init_default {0, 0}
+#define si_agent_IncidentReadResponse_init_default {0, {0, {0}}}
+#define si_agent_IncidentDeleteRequest_init_default {0}
 #define si_agent_Permissions_init_zero           {0, 0, 0}
 #define si_agent_OpenRequest_init_zero           {false, si_agent_Permissions_init_zero, _si_agent_SessionEnd_MIN, 0}
 #define si_agent_SessionInfo_init_zero           {false, si_agent_Permissions_init_zero, _si_agent_SessionEnd_MIN, "", 0, 0, 0, 0, 0}
@@ -177,6 +290,15 @@ extern "C" {
 #define si_agent_EventNotify_init_zero           {0}
 #define si_agent_CaptureReadRequest_init_zero    {0, 0}
 #define si_agent_CaptureReadResponse_init_zero   {0, {0, {0}}}
+#define si_agent_TrapConfig_init_zero            {"", _si_agent_TrapMode_MIN, false, si_agent_Permissions_init_zero, 0, 0}
+#define si_agent_ArmRequest_init_zero            {false, si_agent_TrapConfig_init_zero, {0, {0}}, 0, 0}
+#define si_agent_TrapStatus_init_zero            {false, si_agent_TrapConfig_init_zero, _si_agent_TrapState_MIN, "", {0, {0}}, 0, 0, 0, 0, 0, false, si_agent_ScriptResult_init_zero}
+#define si_agent_IncidentListRequest_init_zero   {0}
+#define si_agent_IncidentInfo_init_zero          {0, 0, 0, "", "", 0, 0, 0}
+#define si_agent_IncidentListResponse_init_zero  {0, {si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero, si_agent_IncidentInfo_init_zero}, 0}
+#define si_agent_IncidentReadRequest_init_zero   {0, 0}
+#define si_agent_IncidentReadResponse_init_zero  {0, {0, {0}}}
+#define si_agent_IncidentDeleteRequest_init_zero {0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define si_agent_Permissions_write_tag           1
@@ -220,6 +342,41 @@ extern "C" {
 #define si_agent_CaptureReadRequest_offset_tag   2
 #define si_agent_CaptureReadResponse_total_tag   1
 #define si_agent_CaptureReadResponse_data_tag    2
+#define si_agent_TrapConfig_name_tag             1
+#define si_agent_TrapConfig_mode_tag             2
+#define si_agent_TrapConfig_permissions_tag      3
+#define si_agent_TrapConfig_connect_under_reset_tag 4
+#define si_agent_TrapConfig_incidents_per_hour_tag 5
+#define si_agent_ArmRequest_config_tag           1
+#define si_agent_ArmRequest_bytecode_tag         2
+#define si_agent_ArmRequest_staged_tag           3
+#define si_agent_ArmRequest_timeout_ms_tag       4
+#define si_agent_TrapStatus_config_tag           1
+#define si_agent_TrapStatus_state_tag            2
+#define si_agent_TrapStatus_note_tag             3
+#define si_agent_TrapStatus_module_sha256_tag    4
+#define si_agent_TrapStatus_starts_tag           5
+#define si_agent_TrapStatus_incidents_tag        6
+#define si_agent_TrapStatus_newest_incident_tag  7
+#define si_agent_TrapStatus_suppressed_tag       8
+#define si_agent_TrapStatus_newest_event_seq_tag 9
+#define si_agent_TrapStatus_first_result_tag     10
+#define si_agent_IncidentListRequest_after_id_tag 1
+#define si_agent_IncidentInfo_id_tag             1
+#define si_agent_IncidentInfo_size_tag           2
+#define si_agent_IncidentInfo_kind_tag           3
+#define si_agent_IncidentInfo_name_tag           4
+#define si_agent_IncidentInfo_trap_tag           5
+#define si_agent_IncidentInfo_boot_tag           6
+#define si_agent_IncidentInfo_uptime_us_tag      7
+#define si_agent_IncidentInfo_utc_ms_tag         8
+#define si_agent_IncidentListResponse_incidents_tag 1
+#define si_agent_IncidentListResponse_more_tag   2
+#define si_agent_IncidentReadRequest_id_tag      1
+#define si_agent_IncidentReadRequest_offset_tag  2
+#define si_agent_IncidentReadResponse_total_tag  1
+#define si_agent_IncidentReadResponse_data_tag   2
+#define si_agent_IncidentDeleteRequest_id_tag    1
 
 /* Struct field encoding specification for nanopb */
 #define si_agent_Permissions_FIELDLIST(X, a) \
@@ -318,6 +475,82 @@ X(a, STATIC,   SINGULAR, BYTES,    data,              2)
 #define si_agent_CaptureReadResponse_CALLBACK NULL
 #define si_agent_CaptureReadResponse_DEFAULT NULL
 
+#define si_agent_TrapConfig_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, STRING,   name,              1) \
+X(a, STATIC,   SINGULAR, UENUM,    mode,              2) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  permissions,       3) \
+X(a, STATIC,   SINGULAR, BOOL,     connect_under_reset,   4) \
+X(a, STATIC,   SINGULAR, UINT32,   incidents_per_hour,   5)
+#define si_agent_TrapConfig_CALLBACK NULL
+#define si_agent_TrapConfig_DEFAULT NULL
+#define si_agent_TrapConfig_permissions_MSGTYPE si_agent_Permissions
+
+#define si_agent_ArmRequest_FIELDLIST(X, a) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  config,            1) \
+X(a, STATIC,   SINGULAR, BYTES,    bytecode,          2) \
+X(a, STATIC,   SINGULAR, BOOL,     staged,            3) \
+X(a, STATIC,   SINGULAR, UINT32,   timeout_ms,        4)
+#define si_agent_ArmRequest_CALLBACK NULL
+#define si_agent_ArmRequest_DEFAULT NULL
+#define si_agent_ArmRequest_config_MSGTYPE si_agent_TrapConfig
+
+#define si_agent_TrapStatus_FIELDLIST(X, a) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  config,            1) \
+X(a, STATIC,   SINGULAR, UENUM,    state,             2) \
+X(a, STATIC,   SINGULAR, STRING,   note,              3) \
+X(a, STATIC,   SINGULAR, BYTES,    module_sha256,     4) \
+X(a, STATIC,   SINGULAR, UINT32,   starts,            5) \
+X(a, STATIC,   SINGULAR, UINT32,   incidents,         6) \
+X(a, STATIC,   SINGULAR, UINT32,   newest_incident,   7) \
+X(a, STATIC,   SINGULAR, UINT32,   suppressed,        8) \
+X(a, STATIC,   SINGULAR, UINT32,   newest_event_seq,   9) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  first_result,     10)
+#define si_agent_TrapStatus_CALLBACK NULL
+#define si_agent_TrapStatus_DEFAULT NULL
+#define si_agent_TrapStatus_config_MSGTYPE si_agent_TrapConfig
+#define si_agent_TrapStatus_first_result_MSGTYPE si_agent_ScriptResult
+
+#define si_agent_IncidentListRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   after_id,          1)
+#define si_agent_IncidentListRequest_CALLBACK NULL
+#define si_agent_IncidentListRequest_DEFAULT NULL
+
+#define si_agent_IncidentInfo_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   id,                1) \
+X(a, STATIC,   SINGULAR, UINT32,   size,              2) \
+X(a, STATIC,   SINGULAR, UINT32,   kind,              3) \
+X(a, STATIC,   SINGULAR, STRING,   name,              4) \
+X(a, STATIC,   SINGULAR, STRING,   trap,              5) \
+X(a, STATIC,   SINGULAR, UINT32,   boot,              6) \
+X(a, STATIC,   SINGULAR, UINT64,   uptime_us,         7) \
+X(a, STATIC,   SINGULAR, UINT64,   utc_ms,            8)
+#define si_agent_IncidentInfo_CALLBACK NULL
+#define si_agent_IncidentInfo_DEFAULT NULL
+
+#define si_agent_IncidentListResponse_FIELDLIST(X, a) \
+X(a, STATIC,   REPEATED, MESSAGE,  incidents,         1) \
+X(a, STATIC,   SINGULAR, BOOL,     more,              2)
+#define si_agent_IncidentListResponse_CALLBACK NULL
+#define si_agent_IncidentListResponse_DEFAULT NULL
+#define si_agent_IncidentListResponse_incidents_MSGTYPE si_agent_IncidentInfo
+
+#define si_agent_IncidentReadRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   id,                1) \
+X(a, STATIC,   SINGULAR, UINT32,   offset,            2)
+#define si_agent_IncidentReadRequest_CALLBACK NULL
+#define si_agent_IncidentReadRequest_DEFAULT NULL
+
+#define si_agent_IncidentReadResponse_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   total,             1) \
+X(a, STATIC,   SINGULAR, BYTES,    data,              2)
+#define si_agent_IncidentReadResponse_CALLBACK NULL
+#define si_agent_IncidentReadResponse_DEFAULT NULL
+
+#define si_agent_IncidentDeleteRequest_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   id,                1)
+#define si_agent_IncidentDeleteRequest_CALLBACK NULL
+#define si_agent_IncidentDeleteRequest_DEFAULT NULL
+
 extern const pb_msgdesc_t si_agent_Permissions_msg;
 extern const pb_msgdesc_t si_agent_OpenRequest_msg;
 extern const pb_msgdesc_t si_agent_SessionInfo_msg;
@@ -331,6 +564,15 @@ extern const pb_msgdesc_t si_agent_EventReadResponse_msg;
 extern const pb_msgdesc_t si_agent_EventNotify_msg;
 extern const pb_msgdesc_t si_agent_CaptureReadRequest_msg;
 extern const pb_msgdesc_t si_agent_CaptureReadResponse_msg;
+extern const pb_msgdesc_t si_agent_TrapConfig_msg;
+extern const pb_msgdesc_t si_agent_ArmRequest_msg;
+extern const pb_msgdesc_t si_agent_TrapStatus_msg;
+extern const pb_msgdesc_t si_agent_IncidentListRequest_msg;
+extern const pb_msgdesc_t si_agent_IncidentInfo_msg;
+extern const pb_msgdesc_t si_agent_IncidentListResponse_msg;
+extern const pb_msgdesc_t si_agent_IncidentReadRequest_msg;
+extern const pb_msgdesc_t si_agent_IncidentReadResponse_msg;
+extern const pb_msgdesc_t si_agent_IncidentDeleteRequest_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define si_agent_Permissions_fields &si_agent_Permissions_msg
@@ -346,9 +588,19 @@ extern const pb_msgdesc_t si_agent_CaptureReadResponse_msg;
 #define si_agent_EventNotify_fields &si_agent_EventNotify_msg
 #define si_agent_CaptureReadRequest_fields &si_agent_CaptureReadRequest_msg
 #define si_agent_CaptureReadResponse_fields &si_agent_CaptureReadResponse_msg
+#define si_agent_TrapConfig_fields &si_agent_TrapConfig_msg
+#define si_agent_ArmRequest_fields &si_agent_ArmRequest_msg
+#define si_agent_TrapStatus_fields &si_agent_TrapStatus_msg
+#define si_agent_IncidentListRequest_fields &si_agent_IncidentListRequest_msg
+#define si_agent_IncidentInfo_fields &si_agent_IncidentInfo_msg
+#define si_agent_IncidentListResponse_fields &si_agent_IncidentListResponse_msg
+#define si_agent_IncidentReadRequest_fields &si_agent_IncidentReadRequest_msg
+#define si_agent_IncidentReadResponse_fields &si_agent_IncidentReadResponse_msg
+#define si_agent_IncidentDeleteRequest_fields &si_agent_IncidentDeleteRequest_msg
 
 /* Maximum encoded size of messages (where known) */
-#define SI_AGENT_AGENT_PB_H_MAX_SIZE             si_agent_UploadRequest_size
+#define SI_AGENT_AGENT_PB_H_MAX_SIZE             si_agent_ArmRequest_size
+#define si_agent_ArmRequest_size                 7992
 #define si_agent_CaptureReadRequest_size         12
 #define si_agent_CaptureReadResponse_size        4105
 #define si_agent_EvalRequest_size                7945
@@ -356,11 +608,19 @@ extern const pb_msgdesc_t si_agent_CaptureReadResponse_msg;
 #define si_agent_EventReadRequest_size           6
 #define si_agent_EventReadResponse_size          6484
 #define si_agent_Event_size                      806
+#define si_agent_IncidentDeleteRequest_size      6
+#define si_agent_IncidentInfo_size               96
+#define si_agent_IncidentListRequest_size        6
+#define si_agent_IncidentListResponse_size       1570
+#define si_agent_IncidentReadRequest_size        12
+#define si_agent_IncidentReadResponse_size       4105
 #define si_agent_OpenRequest_size                12
 #define si_agent_Permissions_size                6
 #define si_agent_RunRequest_size                 7947
 #define si_agent_ScriptResult_size               5322
 #define si_agent_SessionInfo_size                53
+#define si_agent_TrapConfig_size                 43
+#define si_agent_TrapStatus_size                 5533
 #define si_agent_UploadRequest_size              7951
 
 #ifdef __cplusplus

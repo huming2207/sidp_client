@@ -82,6 +82,12 @@ namespace sidp
         OP_SCRIPT_UPLOAD = 0x0313,
         OP_EVENT_READ = 0x0320,
         OP_CAPTURE_READ = 0x0321,
+        OP_TRAP_ARM = 0x0330,
+        OP_TRAP_DISARM = 0x0331,
+        OP_TRAP_STATUS = 0x0332,
+        OP_INCIDENT_LIST = 0x0340,
+        OP_INCIDENT_READ = 0x0341,
+        OP_INCIDENT_DELETE = 0x0342,
         OP_AGENT_EVENT = 0x0380, // KIND_LOG_STREAM: expendable notice, EVENT_READ has the events
     };
 
@@ -114,6 +120,7 @@ namespace sidp
         STATUS_NO_SESSION = 40,      // Agent: AGENT_OPEN first
         STATUS_NO_SCRIPTS = 41,      // Agent: the firmware can't run scripts now (see the device log)
         STATUS_NEEDS_CORTEX_M = 42,  // Agent: the device needs a Cortex-M job to know the target
+        STATUS_TRAP_ARMED = 43,      // Agent: a trap has the target; TRAP_STATUS says which
     };
 
     enum architecture_t : std::uint8_t {
