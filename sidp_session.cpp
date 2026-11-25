@@ -378,6 +378,10 @@ namespace sidp
 
         attach_info_t info{};
         const esp_err_t result = backend.attach(params, info);
+        if (result == ESP_ERR_INVALID_STATE) {
+            send_response(OP_ATTACH, request_id, STATUS_BUSY); // someone else has the target, not an SWD fault
+            return;
+        }
         if (result != ESP_OK) {
             send_backend_failure(OP_ATTACH, request_id, result, STATUS_SWD_ERROR);
             return;

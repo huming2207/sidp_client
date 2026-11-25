@@ -31,6 +31,7 @@ struct mock_target_t {
     bool detach_ok = true;
     bool malformed_map = false;
     bool fail_attach = false;
+    esp_err_t attach_result = ESP_OK; // returned by attach when not ESP_OK
     bool fault_on_next = false; // next op returns FAULT
     bool halt_will_timeout = false;
     bool fail_after_patch = false;
@@ -84,6 +85,9 @@ public:
     {
         if (target_.fail_attach) {
             return ESP_FAIL;
+        }
+        if (target_.attach_result != ESP_OK) {
+            return target_.attach_result;
         }
         info.architecture = ARCH_ARM_M;
         info.profile = PROFILE_ARMV7EM;
@@ -1172,6 +1176,26 @@ int main()
         CHECK(response_status(0) == STATUS_TARGET_LOST);
         CHECK(frame_header(1)->opcode == EVT_TARGET_LOST);
         CHECK(session.get_state() == TARGET_LOST);
+    }
+
+    // Attach while something else holds the target: BUSY, not an SWD fault, and a
+    // later attach works.
+    {
+        tx_frames.clear();
+        mock_target_t target;
+        target.attach_result = ESP_ERR_INVALID_STATE;
+        mock_backend_t backend(target);
+        sidp_session session(backend, capture_tx);
+        CHECK(session.init() == ESP_OK);
+        attach_request_t attach_req{};
+        session.handle_request(make_request(OP_ATTACH, 1, &attach_req, sizeof(attach_req)));
+        CHECK(tx_frames.size() == 1);
+        CHECK(response_status(0) == STATUS_BUSY);
+        CHECK(session.get_state() != TARGET_LOST);
+        target.attach_result = ESP_OK;
+        tx_frames.clear();
+        session.handle_request(make_request(OP_ATTACH, 2, &attach_req, sizeof(attach_req)));
+        CHECK(response_status(0) == STATUS_OK);
     }
 
     // ---- Test 16: memory flags: neither REQUIRE_HALTED nor ALLOW_RUNNING -> invalid ----
