@@ -145,6 +145,15 @@ message Script {
     bool network = 4;           // The script may use esp:ws; needs firmware built with it.
 }
 
+// What a Cortex-M run leaves the target doing when it ends. ESP32 targets are
+// always reset into their application, as before.
+enum RunEnd {
+    RUN_END_DEFAULT = 0; // RESET after a passed run, AS_IS after a failed or cancelled one.
+    RUN_END_RESET = 1;   // Vector catch and debug enable cleared, nRST pulsed: the firmware boots.
+    RUN_END_RESUME = 2;  // Vector catch and debug enable cleared: the core goes on from where it is.
+    RUN_END_AS_IS = 3;   // Only the SWD pins are released: a halted core stays halted.
+}
+
 message Job {
     SchemaVersion schema_version = 1;
     Target target = 2;
@@ -152,4 +161,6 @@ message Job {
     Procedure post_program = 4;
     string name = 5; // Shown by JOB_GET; defaults to the variant name.
     Script script = 6;
+    RunEnd on_pass = 7;
+    RunEnd on_fail = 8; // Also after a cancelled run.
 }

@@ -16,6 +16,15 @@ typedef enum _si_job_SchemaVersion {
     si_job_SchemaVersion_SCHEMA_VERSION_CURRENT = 1
 } si_job_SchemaVersion;
 
+/* What a Cortex-M run leaves the target doing when it ends. ESP32 targets are
+ always reset into their application, as before. */
+typedef enum _si_job_RunEnd {
+    si_job_RunEnd_RUN_END_DEFAULT = 0, /* RESET after a passed run, AS_IS after a failed or cancelled one. */
+    si_job_RunEnd_RUN_END_RESET = 1, /* Vector catch and debug enable cleared, nRST pulsed: the firmware boots. */
+    si_job_RunEnd_RUN_END_RESUME = 2, /* Vector catch and debug enable cleared: the core goes on from where it is. */
+    si_job_RunEnd_RUN_END_AS_IS = 3 /* Only the SWD pins are released: a halted core stays halted. */
+} si_job_RunEnd;
+
 typedef enum _si_job_MemoryRegion_Kind {
     si_job_MemoryRegion_Kind_KIND_UNSPECIFIED = 0,
     si_job_MemoryRegion_Kind_KIND_RAM = 1,
@@ -184,6 +193,8 @@ typedef struct _si_job_Job {
     char name[32]; /* Shown by JOB_GET; defaults to the variant name. */
     bool has_script;
     si_job_Script script;
+    si_job_RunEnd on_pass;
+    si_job_RunEnd on_fail; /* Also after a cancelled run. */
 } si_job_Job;
 
 
@@ -195,6 +206,10 @@ extern "C" {
 #define _si_job_SchemaVersion_MIN si_job_SchemaVersion_SCHEMA_VERSION_UNSPECIFIED
 #define _si_job_SchemaVersion_MAX si_job_SchemaVersion_SCHEMA_VERSION_CURRENT
 #define _si_job_SchemaVersion_ARRAYSIZE ((si_job_SchemaVersion)(si_job_SchemaVersion_SCHEMA_VERSION_CURRENT+1))
+
+#define _si_job_RunEnd_MIN si_job_RunEnd_RUN_END_DEFAULT
+#define _si_job_RunEnd_MAX si_job_RunEnd_RUN_END_AS_IS
+#define _si_job_RunEnd_ARRAYSIZE ((si_job_RunEnd)(si_job_RunEnd_RUN_END_AS_IS+1))
 
 #define _si_job_MemoryRegion_Kind_MIN si_job_MemoryRegion_Kind_KIND_UNSPECIFIED
 #define _si_job_MemoryRegion_Kind_MAX si_job_MemoryRegion_Kind_KIND_NVM
@@ -223,6 +238,8 @@ extern "C" {
 
 
 #define si_job_Job_schema_version_ENUMTYPE si_job_SchemaVersion
+#define si_job_Job_on_pass_ENUMTYPE si_job_RunEnd
+#define si_job_Job_on_fail_ENUMTYPE si_job_RunEnd
 
 
 /* Initializer values for message structs */
@@ -242,7 +259,7 @@ extern "C" {
 #define si_job_Step_init_default                 {0, 0, {si_job_Read32_init_default}}
 #define si_job_Procedure_init_default            {0, {si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default, si_job_Step_init_default}}
 #define si_job_Script_init_default               {"", {0, {0}}, 0, 0}
-#define si_job_Job_init_default                  {_si_job_SchemaVersion_MIN, false, si_job_Target_init_default, false, si_job_Procedure_init_default, false, si_job_Procedure_init_default, "", false, si_job_Script_init_default}
+#define si_job_Job_init_default                  {_si_job_SchemaVersion_MIN, false, si_job_Target_init_default, false, si_job_Procedure_init_default, false, si_job_Procedure_init_default, "", false, si_job_Script_init_default, _si_job_RunEnd_MIN, _si_job_RunEnd_MIN}
 #define si_job_MemoryRegion_init_zero            {_si_job_MemoryRegion_Kind_MIN, 0, 0}
 #define si_job_FlashAlgorithm_init_zero          {"", 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, 0, false, 0, false, 0, false, 0, {{NULL}, NULL}}
 #define si_job_CortexM_init_zero                 {false, si_job_FlashAlgorithm_init_zero, {0}}
@@ -259,7 +276,7 @@ extern "C" {
 #define si_job_Step_init_zero                    {0, 0, {si_job_Read32_init_zero}}
 #define si_job_Procedure_init_zero               {0, {si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero, si_job_Step_init_zero}}
 #define si_job_Script_init_zero                  {"", {0, {0}}, 0, 0}
-#define si_job_Job_init_zero                     {_si_job_SchemaVersion_MIN, false, si_job_Target_init_zero, false, si_job_Procedure_init_zero, false, si_job_Procedure_init_zero, "", false, si_job_Script_init_zero}
+#define si_job_Job_init_zero                     {_si_job_SchemaVersion_MIN, false, si_job_Target_init_zero, false, si_job_Procedure_init_zero, false, si_job_Procedure_init_zero, "", false, si_job_Script_init_zero, _si_job_RunEnd_MIN, _si_job_RunEnd_MIN}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define si_job_MemoryRegion_kind_tag             1
@@ -332,6 +349,8 @@ extern "C" {
 #define si_job_Job_post_program_tag              4
 #define si_job_Job_name_tag                      5
 #define si_job_Job_script_tag                    6
+#define si_job_Job_on_pass_tag                   7
+#define si_job_Job_on_fail_tag                   8
 
 /* Struct field encoding specification for nanopb */
 #define si_job_MemoryRegion_FIELDLIST(X, a) \
@@ -485,7 +504,9 @@ X(a, STATIC,   OPTIONAL, MESSAGE,  target,            2) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  pre_program,       3) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  post_program,      4) \
 X(a, STATIC,   SINGULAR, STRING,   name,              5) \
-X(a, STATIC,   OPTIONAL, MESSAGE,  script,            6)
+X(a, STATIC,   OPTIONAL, MESSAGE,  script,            6) \
+X(a, STATIC,   SINGULAR, UENUM,    on_pass,           7) \
+X(a, STATIC,   SINGULAR, UENUM,    on_fail,           8)
 #define si_job_Job_CALLBACK NULL
 #define si_job_Job_DEFAULT NULL
 #define si_job_Job_target_MSGTYPE si_job_Target
