@@ -79,6 +79,19 @@ int main() {
     t.disconnect(); t.connect();
     assert(t.begin_session() == ESP_OK);
     expect_empty(t);
+    // The owner, busy when the host reconnected, closes the old session only
+    // after the new link's first request came in: that request must survive.
+    t.disconnect(); t.connect();
+    t.deliver_packet(request.data(), request.size(), t.receive_epoch());
+    t.close_session();
+    assert(t.begin_session() == ESP_OK);
+    assert(t.start_read(&borrowed, &size, 0) == ESP_OK);
+    t.end_read(borrowed);
+    t.close_session(); // an open session still closes
+    assert(t.needs_disconnect());
+    t.disconnect(); t.connect();
+    assert(t.begin_session() == ESP_OK);
+    expect_empty(t);
 
     // Logs have a separate queue; controls stay FIFO and always dequeue first.
     assert(t.write_message_log(frame(10, KIND_LOG_STREAM)) == ESP_OK);

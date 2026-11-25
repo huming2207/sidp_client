@@ -43,6 +43,12 @@ namespace sidp
     void packet_queue_transport::close_session() noexcept
     {
         const queue_guard lock(queue_mutex);
+        // Already closed (the link dropped, a send failed): the queues were
+        // emptied then, and what's queued since came on a newer link that waits
+        // to be accepted. A busy owner closes the old session only after the
+        // host reconnected and sent its first request; draining here (and the
+        // epoch step, which drops a frame half received) lost that request.
+        if (dead.load()) return;
         close_locked();
     }
 
