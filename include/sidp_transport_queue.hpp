@@ -64,8 +64,19 @@ namespace sidp
         /** Called by link callbacks on both connect and disconnect boundaries. */
         void link_changed(bool connected) noexcept;
         [[nodiscard]] virtual bool physical_link_open() const noexcept = 0;
-        /** Called with no TX in flight and the session closed, before acceptance. */
+        /**
+         * Called with no TX in flight and the session closed, before acceptance.
+         * Must not drop received bytes: they belong to the link being accepted
+         * (stale ones went at the link boundary).
+         */
         virtual void reset_wire_buffers() noexcept {}
+        /**
+         * The link is up but begin_session() hasn't accepted it yet. RX keeps
+         * decoding then: the peer may send its first request before the owner
+         * gets to accept (USB sends it a fixed time after DTR), and
+         * deliver_packet() keeps it for the session.
+         */
+        [[nodiscard]] bool awaiting_accept() const noexcept;
         [[nodiscard]] virtual bool deliver_tx_frame(std::span<const std::uint8_t> frame, bool log) noexcept = 0;
 
         /**
@@ -89,6 +100,7 @@ namespace sidp
         static constexpr char TAG[] = "sidp_tq";
 
         void close_locked() noexcept;
+        [[nodiscard]] bool awaiting_accept_locked() const noexcept;
         static void drain(RingbufHandle_t ring) noexcept;
         esp_err_t enqueue(std::span<const std::uint8_t> message, bool log) noexcept;
         static void tx_task_trampoline(void *arg) noexcept;

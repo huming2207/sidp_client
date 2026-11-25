@@ -68,7 +68,17 @@ int main() {
     t.disconnect(); t.connect();
     assert(t.begin_session() == ESP_ERR_INVALID_STATE);
     t.end_read(borrowed);
+    // A request on the new link before the owner accepted it is kept for the
+    // session (USB sends it a fixed time after DTR); one from before isn't.
+    t.deliver_packet(request.data(), request.size(), t.receive_epoch());
     assert(t.begin_session() == ESP_OK);
+    assert(t.start_read(&borrowed, &size, 0) == ESP_OK);
+    t.end_read(borrowed);
+    t.disconnect(); t.connect();
+    t.deliver_packet(request.data(), request.size(), t.receive_epoch());
+    t.disconnect(); t.connect();
+    assert(t.begin_session() == ESP_OK);
+    expect_empty(t);
 
     // Logs have a separate queue; controls stay FIFO and always dequeue first.
     assert(t.write_message_log(frame(10, KIND_LOG_STREAM)) == ESP_OK);
@@ -217,6 +227,13 @@ int main() {
     assert(cdc.begin_session() == ESP_OK);
     expect_empty(cdc);
     feed();
+    assert(cdc.start_read(&borrowed, &size, 0) == ESP_OK);
+    cdc.end_read(borrowed);
+    // The host's first request can arrive after DTR but before the owner
+    // accepts the connection: it must be served, not dropped.
+    host_cdc_dtr(false); host_cdc_dtr(true);
+    feed();
+    assert(cdc.begin_session() == ESP_OK);
     assert(cdc.start_read(&borrowed, &size, 0) == ESP_OK);
     cdc.end_read(borrowed);
     puts("TRANSPORT TESTS PASSED");

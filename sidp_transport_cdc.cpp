@@ -139,7 +139,7 @@ namespace sidp
 
     void cdc_slip_transport::reset_wire_buffers() noexcept
     {
-        tud_cdc_n_read_flush(static_cast<std::uint8_t>(cdc_port));
+        // RX is flushed at the DTR edge instead: what came after it is this link's.
         tud_cdc_n_write_clear(static_cast<std::uint8_t>(cdc_port));
     }
 
@@ -168,6 +168,7 @@ namespace sidp
             const bool dtr = event->line_state_changed_data.dtr;
             if (transport.dtr != dtr) {
                 transport.dtr = dtr;
+                tud_cdc_n_read_flush(static_cast<std::uint8_t>(itf)); // bytes from before this edge
                 transport.link_changed(dtr);
                 transport.reset_frame_state();
                 transport.receiving_frame = false;
@@ -209,12 +210,13 @@ namespace sidp
     void cdc_slip_transport::drain_cdc_input() noexcept
     {
         const auto current_epoch = receive_epoch();
-        if (decoder_epoch != current_epoch || !is_open()) {
+        const bool live = is_open() || awaiting_accept(); // an unaccepted link keeps its requests
+        if (decoder_epoch != current_epoch || !live) {
             reset_frame_state();
             receiving_frame = false;
             decoder_epoch = current_epoch;
         }
-        if (!is_open()) {
+        if (!live) {
             tud_cdc_n_read_flush(static_cast<std::uint8_t>(cdc_port));
             return;
         }

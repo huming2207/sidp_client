@@ -54,17 +54,36 @@ namespace sidp
         close_locked();
     }
 
+    bool packet_queue_transport::awaiting_accept_locked() const noexcept
+    {
+        return dead.load() && link_is_connected() && link_serial != accepted_link_serial;
+    }
+
+    bool packet_queue_transport::awaiting_accept() const noexcept
+    {
+        const queue_guard lock(queue_mutex);
+        return awaiting_accept_locked();
+    }
+
     esp_err_t packet_queue_transport::begin_session() noexcept
     {
         const queue_guard lock(queue_mutex);
-        if (ring_buffer == nullptr || !dead.load() || !link_is_connected() ||
-            link_serial == accepted_link_serial || tx_busy || rx_borrowed != 0) {
+        if (ring_buffer == nullptr || !awaiting_accept_locked() || tx_busy || rx_borrowed != 0) {
             return ESP_ERR_INVALID_STATE;
         }
-        close_locked();
+        // Requests that arrived on this link before it was accepted stay queued:
+        // dropping them left the peer waiting for an answer (USB sends its first
+        // request a fixed time after DTR, maybe while the owner is still busy).
+        // Anything from an earlier link went at link_changed().
+        drain(tx_ring);
+        drain(log_ring);
+        tx_pending = 0;
         reset_wire_buffers();
         accepted_link_serial = link_serial;
         dead.store(false);
+        if (rx_queued != 0) {
+            if (TaskHandle_t reader = rx_reader.load()) xTaskNotifyGive(reader);
+        }
         return ESP_OK;
     }
 
@@ -146,14 +165,18 @@ namespace sidp
         const std::span<const std::uint8_t> packet(data, size);
         if (!is_valid_message_size(size) || !crc32_hasher::verify_message_crc(packet)) return;
         const queue_guard lock(queue_mutex);
-        if (!is_open() || received_epoch != epoch.load()) return;
+        if (received_epoch != epoch.load()) return;
+        const bool early = !is_open() && awaiting_accept_locked(); // kept for begin_session()
+        if (!is_open() && !early) return;
         if (data[0] != PROTOCOL_VERSION || xRingbufferSend(ring_buffer, data, size, 0) != pdTRUE) {
             // Losing a request or receiving an unknown layout ends this session.
-            close_locked();
+            if (!early) close_locked();
             return;
         }
         ++rx_queued;
-        if (TaskHandle_t reader = rx_reader.load()) xTaskNotifyGive(reader);
+        if (!early) {
+            if (TaskHandle_t reader = rx_reader.load()) xTaskNotifyGive(reader);
+        }
     }
 
     TickType_t packet_queue_transport::timeout_to_ticks(std::uint32_t timeout_ms) noexcept
