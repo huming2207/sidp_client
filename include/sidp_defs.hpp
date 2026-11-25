@@ -119,7 +119,7 @@ namespace sidp
 
         STATUS_NO_SESSION = 40,      // Agent: AGENT_OPEN first
         STATUS_NO_SCRIPTS = 41,      // Agent: the firmware can't run scripts now (see the device log)
-        STATUS_NEEDS_CORTEX_M = 42,  // Agent: the device needs a Cortex-M job to know the target
+        STATUS_NEEDS_CORTEX_M = 42,  // Agent and ATTACH: the device needs a Cortex-M job to know the target
         STATUS_TRAP_ARMED = 43,      // Agent: a trap has the target; TRAP_STATUS says which
     };
 

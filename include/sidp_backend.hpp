@@ -183,7 +183,9 @@ namespace sidp
          *
          * Must not reset the target unless params.connect_under_reset is set.
          * Returns ESP_ERR_INVALID_STATE when something else holds the target (a
-         * programming run, an agent session, a trap): the session answers BUSY.
+         * programming run, an agent session, a trap): the session answers BUSY;
+         * ESP_ERR_NOT_FOUND when nothing on the device describes the target (no
+         * Cortex-M job): NEEDS_CORTEX_M.
          * Report only capabilities and resource counts the backend can actually
          * serve; the session sanitizes extremes but cannot detect a feature that
          * is advertised and then rejected later. See the class-level contract.

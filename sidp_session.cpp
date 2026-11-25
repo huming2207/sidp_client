@@ -382,6 +382,10 @@ namespace sidp
             send_response(OP_ATTACH, request_id, STATUS_BUSY); // someone else has the target, not an SWD fault
             return;
         }
+        if (result == ESP_ERR_NOT_FOUND) {
+            send_response(OP_ATTACH, request_id, STATUS_NEEDS_CORTEX_M); // no job says what the target is
+            return;
+        }
         if (result != ESP_OK) {
             send_backend_failure(OP_ATTACH, request_id, result, STATUS_SWD_ERROR);
             return;

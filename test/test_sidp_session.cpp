@@ -1192,9 +1192,13 @@ int main()
         CHECK(tx_frames.size() == 1);
         CHECK(response_status(0) == STATUS_BUSY);
         CHECK(session.get_state() != TARGET_LOST);
-        target.attach_result = ESP_OK;
+        target.attach_result = ESP_ERR_NOT_FOUND; // no job describes the target
         tx_frames.clear();
         session.handle_request(make_request(OP_ATTACH, 2, &attach_req, sizeof(attach_req)));
+        CHECK(tx_frames.size() == 1 && response_status(0) == STATUS_NEEDS_CORTEX_M);
+        target.attach_result = ESP_OK;
+        tx_frames.clear();
+        session.handle_request(make_request(OP_ATTACH, 3, &attach_req, sizeof(attach_req)));
         CHECK(response_status(0) == STATUS_OK);
     }
 
