@@ -18,12 +18,14 @@ but require hardware validation.
 - `test/`: host session tests with a mock target.
 - `proto/`: protobuf schemas for programming jobs (`job.proto`), the
   management service (`manage.proto`, opcodes 0x0100 and up: device info,
-  clock, asset upload, jobs, production log) and the power service
-  (`power.proto`), their nanopb size limits (`*.options`) and the generated
+  clock, asset upload, jobs, production log), the power service
+  (`power.proto`) and the agent service (`agent.proto`), their nanopb size limits (`*.options`) and the generated
   nanopb sources. Jobs are compiled on the host by `sidp-agent compile`. The
   SIDP header and the debug opcodes do not use protobuf.
 - `nanopb/`: vendored nanopb 0.4.9.2 runtime.
 - `docs/sidp-power.md`: the power service, opcodes 0x0200 and up.
+- `docs/sidp-agent.md`: the agent service, opcodes 0x0300 and up: scripts,
+  watches, events and captures for LLM agents.
 - `docs/integration.md`: connection lifecycle and cleanup wiring.
 
 ## Next milestone

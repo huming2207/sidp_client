@@ -9,6 +9,6 @@
 set -e
 : "${NANOPB_DIR:?set NANOPB_DIR to a nanopb 0.4.9.2 source tree}"
 cd "$(dirname "$0")"
-for proto in job manage power; do
+for proto in job manage power agent; do
     python3 "$NANOPB_DIR/generator/nanopb_generator.py" -f "$proto.options" "$proto.proto"
 done

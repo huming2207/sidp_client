@@ -1,0 +1,110 @@
+// Soul Injector agent service payloads (SIDP opcodes 0x0300 and up).
+//
+// An agent session runs JavaScript on the device against a Cortex-M target,
+// for an LLM agent driving sidp-agent's MCP server. The SIDP header and the
+// response status prefix are unchanged; these messages are the payload after
+// them. See docs/sidp-agent.md.
+syntax = "proto3";
+
+package si.agent;
+
+// What the session's scripts may do besides reading the target, halting and
+// resuming it. The person who starts the session grants these
+// (sidp-agent mcp --allow-write, --allow-flash, --allow-reset).
+message Permissions {
+    bool write = 1; // Memory and core register writes, target.call().
+    bool flash = 2; // si:flash.
+    bool reset = 3; // target.reset() and reinit(), 'reset' reflexes and handler results.
+}
+
+// What happens to the target when the session ends (AGENT_CLOSE or the
+// connection closing). Watches, vector catch and breakpoints are removed first.
+enum SessionEnd {
+    SESSION_END_AS_IS = 0;  // A running target keeps running, a halted one stays halted.
+    SESSION_END_RESUME = 1; // The target runs.
+    SESSION_END_RESET = 2;  // The target is reset and runs.
+}
+
+message OpenRequest {
+    Permissions permissions = 1;
+    SessionEnd session_end = 2;
+    bool connect_under_reset = 3; // Connect with the target held in reset; it then starts halted.
+}
+
+message SessionInfo {
+    Permissions permissions = 1;
+    SessionEnd session_end = 2;
+    string js_version = 3;     // QuickJS-NG version scripts run on.
+    uint32 arena_kb = 4;       // Memory scripts may use.
+    uint32 cpu_id = 5;         // The target's CPUID register.
+    uint32 profile = 6;        // sidp::target_profile_t.
+    bool fpu = 7;
+    uint32 newest_event_seq = 8; // Events up to this one happened before the request.
+}
+
+message RunRequest {
+    bytes bytecode = 1;    // Container with one ES module (sidp-qjsc compile).
+    bool staged = 2;       // Run the module sent with SCRIPT_UPLOAD instead; `bytecode` must be empty.
+    uint32 timeout_ms = 3; // How long to wait for the module's top level; 0 for 5 s.
+}
+
+// A module too big for one RunRequest, in pieces. Kept in device RAM until
+// the next upload, a run of it, or the end of the session.
+message UploadRequest {
+    uint32 offset = 1; // 0 starts a new upload; then the bytes received so far.
+    uint32 total = 2;  // Size of the whole container, the same in every piece.
+    bytes data = 3;
+}
+
+message EvalRequest {
+    bytes bytecode = 1;    // Container with an async global script (sidp-qjsc compile_eval).
+    uint32 timeout_ms = 2; // How long to wait for the result; 0 for 5 s.
+}
+
+message ScriptResult {
+    enum Outcome {
+        OUTCOME_OK = 0;      // Eval: `value` is the result as JSON. Run: the top level finished.
+        OUTCOME_ERROR = 1;   // It threw: `error` and `stack`.
+        OUTCOME_PENDING = 2; // Still running after timeout_ms; it carries on.
+        OUTCOME_STOPPED = 3; // The runtime was stopped (too long without yielding, out of memory...); `error` says why.
+    }
+    Outcome outcome = 1;
+    string value = 2;
+    bool truncated = 3;    // `value` was cut to fit.
+    string error = 4;
+    string stack = 5;
+}
+
+message EventReadRequest {
+    uint32 after_seq = 1; // Returns events with larger sequence numbers, oldest first.
+}
+
+message Event {
+    uint32 seq = 1;
+    uint64 uptime_us = 2;
+    string kind = 3;       // "console", "emit", "watch", "stop", "error", "runtime", "result" or "target".
+    string json = 4;       // A JSON object; its fields depend on the kind.
+    uint32 capture_id = 5; // CAPTURE_READ this; 0 for none.
+}
+
+message EventReadResponse {
+    repeated Event events = 1;
+    uint32 newest_seq = 2;
+    uint32 dropped = 3;    // console and emit events rate limited away this session. Events overwritten
+                           // before they were read show as a gap in seq.
+}
+
+// AGENT_EVENT (log stream, expendable): new events are ready for EVENT_READ.
+message EventNotify {
+    uint32 newest_seq = 1;
+}
+
+message CaptureReadRequest {
+    uint32 capture_id = 1;
+    uint32 offset = 2;
+}
+
+message CaptureReadResponse {
+    uint32 total = 1; // Capture length; read until offset reaches it.
+    bytes data = 2;
+}

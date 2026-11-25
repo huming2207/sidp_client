@@ -70,6 +70,19 @@ namespace sidp
         OP_POWER_STOP = 0x0202,
         OP_POWER_DATA = 0x0210, // KIND_LOG_STREAM: expendable, dropped when the queue is full
         EVT_POWER_STOPPED = 0x0220,
+
+        // Agent service (docs/sidp-agent.md). Payloads are protobuf messages from
+        // proto/agent.proto.
+        OP_AGENT_OPEN = 0x0300,
+        OP_AGENT_CLOSE = 0x0301,
+        OP_AGENT_INFO = 0x0302,
+        OP_SCRIPT_RUN = 0x0310,
+        OP_SCRIPT_EVAL = 0x0311,
+        OP_SCRIPT_STOP = 0x0312,
+        OP_SCRIPT_UPLOAD = 0x0313,
+        OP_EVENT_READ = 0x0320,
+        OP_CAPTURE_READ = 0x0321,
+        OP_AGENT_EVENT = 0x0380, // KIND_LOG_STREAM: expendable notice, EVENT_READ has the events
     };
 
     /** @brief First opcode of the management service; lower opcodes are debug. */
@@ -97,6 +110,10 @@ namespace sidp
 
         STATUS_LOG_FULL = 30, // Management: production log needs collecting before a run
         STATUS_UNAUTHORIZED = 31, // Network: log in first, or the login failed
+
+        STATUS_NO_SESSION = 40,      // Agent: AGENT_OPEN first
+        STATUS_NO_SCRIPTS = 41,      // Agent: the firmware can't run scripts now (see the device log)
+        STATUS_NEEDS_CORTEX_M = 42,  // Agent: the device needs a Cortex-M job to know the target
     };
 
     enum architecture_t : std::uint8_t {

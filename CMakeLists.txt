@@ -10,6 +10,7 @@ idf_component_register(
          "proto/job.pb.c"
          "proto/manage.pb.c"
          "proto/power.pb.c"
+         "proto/agent.pb.c"
     INCLUDE_DIRS "include" "nanopb" "proto"
     REQUIRES esp_ringbuf esp_tinyusb tinyusb esp_timer esp_websocket_client esp_common log
 )

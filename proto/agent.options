@@ -1,0 +1,12 @@
+# nanopb limits for the device. sidp-agent enforces the same limits.
+si.agent.SessionInfo.js_version         max_size:16
+si.agent.RunRequest.bytecode            max_size:7936
+si.agent.UploadRequest.data             max_size:7936
+si.agent.EvalRequest.bytecode           max_size:7936
+si.agent.ScriptResult.value             max_size:4096
+si.agent.ScriptResult.error             max_size:192
+si.agent.ScriptResult.stack             max_size:1024
+si.agent.Event.kind                     max_size:12
+si.agent.Event.json                     max_size:768
+si.agent.EventReadResponse.events       max_count:8
+si.agent.CaptureReadResponse.data       max_size:4096
