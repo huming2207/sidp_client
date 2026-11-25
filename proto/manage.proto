@@ -15,6 +15,9 @@ message DeviceInfo {
     uint64 log_newest_id = 5; // Newest production log entry; 0 when empty.
     uint64 log_acked_id = 6;  // Entries up to this ID have been collected.
     bool log_full = 7;        // Runs are refused: the log needs collecting, or a log write failed (until restart).
+    string js_version = 8;    // QuickJS-NG version job scripts run on, e.g. "0.18.0"; empty without script support.
+    uint32 js_arena_kb = 9;   // Memory a script may use.
+    bool js_network = 10;     // Scripts may use esp:ws (Script.network).
 }
 
 // Sets the device clock for this boot; the first request after boot wins.

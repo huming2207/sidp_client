@@ -63,6 +63,9 @@ typedef struct _si_manage_DeviceInfo {
     uint64_t log_newest_id; /* Newest production log entry; 0 when empty. */
     uint64_t log_acked_id; /* Entries up to this ID have been collected. */
     bool log_full; /* Runs are refused: the log needs collecting, or a log write failed (until restart). */
+    char js_version[16]; /* QuickJS-NG version job scripts run on, e.g. "0.18.0"; empty without script support. */
+    uint32_t js_arena_kb; /* Memory a script may use. */
+    bool js_network; /* Scripts may use esp:ws (Script.network). */
 } si_manage_DeviceInfo;
 
 /* Sets the device clock for this boot; the first request after boot wins. */
@@ -239,7 +242,7 @@ extern "C" {
 
 
 /* Initializer values for message structs */
-#define si_manage_DeviceInfo_init_default        {"", "", 0, 0, 0, 0, 0}
+#define si_manage_DeviceInfo_init_default        {"", "", 0, 0, 0, 0, 0, "", 0, 0}
 #define si_manage_SetTimeRequest_init_default    {0}
 #define si_manage_AssetBeginRequest_init_default {"", 0, {0}}
 #define si_manage_AssetBeginResponse_init_default {0, 0}
@@ -256,7 +259,7 @@ extern "C" {
 #define si_manage_LogAckRequest_init_default     {0}
 #define si_manage_NetConfig_init_default         {0, "", "", "", 0, 0, {0, {0}}, {0, {0}}, 0, 0}
 #define si_manage_NetStatus_init_default         {_si_manage_NetState_MIN, "", 0, 0, 0, ""}
-#define si_manage_DeviceInfo_init_zero           {"", "", 0, 0, 0, 0, 0}
+#define si_manage_DeviceInfo_init_zero           {"", "", 0, 0, 0, 0, 0, "", 0, 0}
 #define si_manage_SetTimeRequest_init_zero       {0}
 #define si_manage_AssetBeginRequest_init_zero    {"", 0, {0}}
 #define si_manage_AssetBeginResponse_init_zero   {0, 0}
@@ -282,6 +285,9 @@ extern "C" {
 #define si_manage_DeviceInfo_log_newest_id_tag   5
 #define si_manage_DeviceInfo_log_acked_id_tag    6
 #define si_manage_DeviceInfo_log_full_tag        7
+#define si_manage_DeviceInfo_js_version_tag      8
+#define si_manage_DeviceInfo_js_arena_kb_tag     9
+#define si_manage_DeviceInfo_js_network_tag      10
 #define si_manage_SetTimeRequest_utc_ms_tag      1
 #define si_manage_AssetBeginRequest_name_tag     1
 #define si_manage_AssetBeginRequest_size_tag     2
@@ -345,7 +351,10 @@ X(a, STATIC,   SINGULAR, UINT32,   storage_total_kb,   3) \
 X(a, STATIC,   SINGULAR, UINT32,   storage_free_kb,   4) \
 X(a, STATIC,   SINGULAR, UINT64,   log_newest_id,     5) \
 X(a, STATIC,   SINGULAR, UINT64,   log_acked_id,      6) \
-X(a, STATIC,   SINGULAR, BOOL,     log_full,          7)
+X(a, STATIC,   SINGULAR, BOOL,     log_full,          7) \
+X(a, STATIC,   SINGULAR, STRING,   js_version,        8) \
+X(a, STATIC,   SINGULAR, UINT32,   js_arena_kb,       9) \
+X(a, STATIC,   SINGULAR, BOOL,     js_network,       10)
 #define si_manage_DeviceInfo_CALLBACK NULL
 #define si_manage_DeviceInfo_DEFAULT NULL
 
@@ -513,7 +522,7 @@ extern const pb_msgdesc_t si_manage_NetStatus_msg;
 #define si_manage_AssetBeginRequest_size         73
 #define si_manage_AssetBeginResponse_size        8
 #define si_manage_BootRecord_size                6
-#define si_manage_DeviceInfo_size                102
+#define si_manage_DeviceInfo_size                127
 #define si_manage_JobCancelRequest_size          6
 #define si_manage_JobRunOnceResponse_size        6
 #define si_manage_JobSetRequest_size             36
