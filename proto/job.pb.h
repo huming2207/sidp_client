@@ -44,6 +44,11 @@ typedef struct _si_job_MemoryRegion {
     uint32_t end; /* Exclusive. */
 } si_job_MemoryRegion;
 
+typedef struct _si_job_SectorRange {
+    uint32_t offset;
+    uint32_t size;
+} si_job_SectorRange;
+
 typedef struct _si_job_FlashAlgorithm {
     char name[32];
     uint32_t load_address;
@@ -74,6 +79,12 @@ typedef struct _si_job_FlashAlgorithm {
     bool has_erase_sector_timeout_ms;
     uint32_t erase_sector_timeout_ms;
     pb_callback_t instructions; /* Decoded algorithm blob, not base64. */
+    /* The erase sectors, from target.yaml's flash_properties.sectors: each
+ range starts at offset (from flash_start) and runs until the next one,
+ or flash_end, in sectors of size bytes. Ascending, the first at offset
+ 0. Empty: uniform sectors of page_size (jobs made before this field). */
+    pb_size_t sectors_count;
+    si_job_SectorRange sectors[16];
 } si_job_FlashAlgorithm;
 
 typedef struct _si_job_CortexM {
@@ -225,6 +236,7 @@ extern "C" {
 
 
 
+
 #define si_job_SelfTest_type_ENUMTYPE si_job_SelfTest_Type
 
 
@@ -244,7 +256,8 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define si_job_MemoryRegion_init_default         {_si_job_MemoryRegion_Kind_MIN, 0, 0}
-#define si_job_FlashAlgorithm_init_default       {"", 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, 0, false, 0, false, 0, false, 0, {{NULL}, NULL}}
+#define si_job_FlashAlgorithm_init_default       {"", 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, 0, false, 0, false, 0, false, 0, {{NULL}, NULL}, 0, {si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default, si_job_SectorRange_init_default}}
+#define si_job_SectorRange_init_default          {0, 0}
 #define si_job_CortexM_init_default              {false, si_job_FlashAlgorithm_init_default, {0}}
 #define si_job_Esp32Image_init_default           {"", 0, {0}}
 #define si_job_Esp32_init_default                {"", false, 0, 0, 0, 0, 0, {si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default, si_job_Esp32Image_init_default}}
@@ -261,7 +274,8 @@ extern "C" {
 #define si_job_Script_init_default               {"", {0, {0}}, 0, 0}
 #define si_job_Job_init_default                  {_si_job_SchemaVersion_MIN, false, si_job_Target_init_default, false, si_job_Procedure_init_default, false, si_job_Procedure_init_default, "", false, si_job_Script_init_default, _si_job_RunEnd_MIN, _si_job_RunEnd_MIN}
 #define si_job_MemoryRegion_init_zero            {_si_job_MemoryRegion_Kind_MIN, 0, 0}
-#define si_job_FlashAlgorithm_init_zero          {"", 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, 0, false, 0, false, 0, false, 0, {{NULL}, NULL}}
+#define si_job_FlashAlgorithm_init_zero          {"", 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, 0, false, 0, false, 0, false, 0, {{NULL}, NULL}, 0, {si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero, si_job_SectorRange_init_zero}}
+#define si_job_SectorRange_init_zero             {0, 0}
 #define si_job_CortexM_init_zero                 {false, si_job_FlashAlgorithm_init_zero, {0}}
 #define si_job_Esp32Image_init_zero              {"", 0, {0}}
 #define si_job_Esp32_init_zero                   {"", false, 0, 0, 0, 0, 0, {si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero, si_job_Esp32Image_init_zero}}
@@ -282,6 +296,8 @@ extern "C" {
 #define si_job_MemoryRegion_kind_tag             1
 #define si_job_MemoryRegion_start_tag            2
 #define si_job_MemoryRegion_end_tag              3
+#define si_job_SectorRange_offset_tag            1
+#define si_job_SectorRange_size_tag              2
 #define si_job_FlashAlgorithm_name_tag           1
 #define si_job_FlashAlgorithm_load_address_tag   2
 #define si_job_FlashAlgorithm_pc_init_tag        3
@@ -298,6 +314,7 @@ extern "C" {
 #define si_job_FlashAlgorithm_program_page_timeout_ms_tag 14
 #define si_job_FlashAlgorithm_erase_sector_timeout_ms_tag 15
 #define si_job_FlashAlgorithm_instructions_tag   16
+#define si_job_FlashAlgorithm_sectors_tag        17
 #define si_job_CortexM_algorithm_tag             1
 #define si_job_CortexM_firmware_sha256_tag       2
 #define si_job_Esp32Image_path_tag               1
@@ -376,9 +393,17 @@ X(a, STATIC,   SINGULAR, UINT32,   page_size,        12) \
 X(a, STATIC,   OPTIONAL, UINT32,   erased_byte_value,  13) \
 X(a, STATIC,   OPTIONAL, UINT32,   program_page_timeout_ms,  14) \
 X(a, STATIC,   OPTIONAL, UINT32,   erase_sector_timeout_ms,  15) \
-X(a, CALLBACK, SINGULAR, BYTES,    instructions,     16)
+X(a, CALLBACK, SINGULAR, BYTES,    instructions,     16) \
+X(a, STATIC,   REPEATED, MESSAGE,  sectors,          17)
 #define si_job_FlashAlgorithm_CALLBACK pb_default_field_callback
 #define si_job_FlashAlgorithm_DEFAULT NULL
+#define si_job_FlashAlgorithm_sectors_MSGTYPE si_job_SectorRange
+
+#define si_job_SectorRange_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   offset,            1) \
+X(a, STATIC,   SINGULAR, UINT32,   size,              2)
+#define si_job_SectorRange_CALLBACK NULL
+#define si_job_SectorRange_DEFAULT NULL
 
 #define si_job_CortexM_FIELDLIST(X, a) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  algorithm,         1) \
@@ -516,6 +541,7 @@ X(a, STATIC,   SINGULAR, UENUM,    on_fail,           8)
 
 extern const pb_msgdesc_t si_job_MemoryRegion_msg;
 extern const pb_msgdesc_t si_job_FlashAlgorithm_msg;
+extern const pb_msgdesc_t si_job_SectorRange_msg;
 extern const pb_msgdesc_t si_job_CortexM_msg;
 extern const pb_msgdesc_t si_job_Esp32Image_msg;
 extern const pb_msgdesc_t si_job_Esp32_msg;
@@ -535,6 +561,7 @@ extern const pb_msgdesc_t si_job_Job_msg;
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define si_job_MemoryRegion_fields &si_job_MemoryRegion_msg
 #define si_job_FlashAlgorithm_fields &si_job_FlashAlgorithm_msg
+#define si_job_SectorRange_fields &si_job_SectorRange_msg
 #define si_job_CortexM_fields &si_job_CortexM_msg
 #define si_job_Esp32Image_fields &si_job_Esp32Image_msg
 #define si_job_Esp32_fields &si_job_Esp32_msg
@@ -567,6 +594,7 @@ extern const pb_msgdesc_t si_job_Job_msg;
 #define si_job_Read32_size                       6
 #define si_job_ReadModWrite32_size               18
 #define si_job_Script_size                       75
+#define si_job_SectorRange_size                  12
 #define si_job_SelfTest_size                     41
 #define si_job_Step_size                         28
 #define si_job_Write32_size                      12

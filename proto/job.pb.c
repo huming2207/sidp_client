@@ -9,10 +9,13 @@
 PB_BIND(si_job_MemoryRegion, si_job_MemoryRegion, AUTO)
 
 
-PB_BIND(si_job_FlashAlgorithm, si_job_FlashAlgorithm, AUTO)
+PB_BIND(si_job_FlashAlgorithm, si_job_FlashAlgorithm, 2)
 
 
-PB_BIND(si_job_CortexM, si_job_CortexM, AUTO)
+PB_BIND(si_job_SectorRange, si_job_SectorRange, AUTO)
+
+
+PB_BIND(si_job_CortexM, si_job_CortexM, 2)
 
 
 PB_BIND(si_job_Esp32Image, si_job_Esp32Image, AUTO)

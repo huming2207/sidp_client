@@ -43,6 +43,16 @@ message FlashAlgorithm {
     optional uint32 program_page_timeout_ms = 14;
     optional uint32 erase_sector_timeout_ms = 15;
     bytes instructions = 16; // Decoded algorithm blob, not base64.
+    // The erase sectors, from target.yaml's flash_properties.sectors: each
+    // range starts at offset (from flash_start) and runs until the next one,
+    // or flash_end, in sectors of size bytes. Ascending, the first at offset
+    // 0. Empty: uniform sectors of page_size (jobs made before this field).
+    repeated SectorRange sectors = 17;
+}
+
+message SectorRange {
+    uint32 offset = 1;
+    uint32 size = 2;
 }
 
 message CortexM {
