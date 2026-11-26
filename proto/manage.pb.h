@@ -61,7 +61,7 @@ typedef enum _si_manage_NetState {
 /* Struct definitions */
 typedef struct _si_manage_DeviceInfo {
     char serial[32];
-    char firmware_version[32];
+    char firmware_version[32]; /* Release version from version.txt, e.g. "2026.11.0". */
     uint32_t storage_total_kb;
     uint32_t storage_free_kb;
     uint64_t log_newest_id; /* Newest production log entry; 0 when empty. */
@@ -70,6 +70,9 @@ typedef struct _si_manage_DeviceInfo {
     char js_version[16]; /* QuickJS-NG version job scripts run on, e.g. "0.18.0"; empty without script support. */
     uint32_t js_arena_kb; /* Memory a script may use. */
     bool js_network; /* Scripts may use esp:ws (Script.network). */
+    char firmware_commit[16]; /* Commit the firmware was built from, e.g. "58b55e2"; empty when unknown. */
+    bool firmware_modified; /* The build had uncommitted changes, so firmware_commit isn't all of it. */
+    char hardware[16]; /* Board revision the firmware was built for, e.g. "8" or "7.1". */
 } si_manage_DeviceInfo;
 
 /* Sets the device clock for this boot; the first request after boot wins. */
@@ -246,7 +249,7 @@ extern "C" {
 
 
 /* Initializer values for message structs */
-#define si_manage_DeviceInfo_init_default        {"", "", 0, 0, 0, 0, 0, "", 0, 0}
+#define si_manage_DeviceInfo_init_default        {"", "", 0, 0, 0, 0, 0, "", 0, 0, "", 0, ""}
 #define si_manage_SetTimeRequest_init_default    {0}
 #define si_manage_AssetBeginRequest_init_default {"", 0, {0}}
 #define si_manage_AssetBeginResponse_init_default {0, 0}
@@ -263,7 +266,7 @@ extern "C" {
 #define si_manage_LogAckRequest_init_default     {0}
 #define si_manage_NetConfig_init_default         {0, "", "", "", 0, 0, {0, {0}}, {0, {0}}, 0, 0}
 #define si_manage_NetStatus_init_default         {_si_manage_NetState_MIN, "", 0, 0, 0, ""}
-#define si_manage_DeviceInfo_init_zero           {"", "", 0, 0, 0, 0, 0, "", 0, 0}
+#define si_manage_DeviceInfo_init_zero           {"", "", 0, 0, 0, 0, 0, "", 0, 0, "", 0, ""}
 #define si_manage_SetTimeRequest_init_zero       {0}
 #define si_manage_AssetBeginRequest_init_zero    {"", 0, {0}}
 #define si_manage_AssetBeginResponse_init_zero   {0, 0}
@@ -292,6 +295,9 @@ extern "C" {
 #define si_manage_DeviceInfo_js_version_tag      8
 #define si_manage_DeviceInfo_js_arena_kb_tag     9
 #define si_manage_DeviceInfo_js_network_tag      10
+#define si_manage_DeviceInfo_firmware_commit_tag 11
+#define si_manage_DeviceInfo_firmware_modified_tag 12
+#define si_manage_DeviceInfo_hardware_tag        13
 #define si_manage_SetTimeRequest_utc_ms_tag      1
 #define si_manage_AssetBeginRequest_name_tag     1
 #define si_manage_AssetBeginRequest_size_tag     2
@@ -358,7 +364,10 @@ X(a, STATIC,   SINGULAR, UINT64,   log_acked_id,      6) \
 X(a, STATIC,   SINGULAR, BOOL,     log_full,          7) \
 X(a, STATIC,   SINGULAR, STRING,   js_version,        8) \
 X(a, STATIC,   SINGULAR, UINT32,   js_arena_kb,       9) \
-X(a, STATIC,   SINGULAR, BOOL,     js_network,       10)
+X(a, STATIC,   SINGULAR, BOOL,     js_network,       10) \
+X(a, STATIC,   SINGULAR, STRING,   firmware_commit,  11) \
+X(a, STATIC,   SINGULAR, BOOL,     firmware_modified,  12) \
+X(a, STATIC,   SINGULAR, STRING,   hardware,         13)
 #define si_manage_DeviceInfo_CALLBACK NULL
 #define si_manage_DeviceInfo_DEFAULT NULL
 
@@ -526,7 +535,7 @@ extern const pb_msgdesc_t si_manage_NetStatus_msg;
 #define si_manage_AssetBeginRequest_size         73
 #define si_manage_AssetBeginResponse_size        8
 #define si_manage_BootRecord_size                6
-#define si_manage_DeviceInfo_size                127
+#define si_manage_DeviceInfo_size                163
 #define si_manage_JobCancelRequest_size          6
 #define si_manage_JobRunOnceResponse_size        6
 #define si_manage_JobSetRequest_size             36

@@ -9,7 +9,7 @@ package si.manage;
 
 message DeviceInfo {
     string serial = 1;
-    string firmware_version = 2;
+    string firmware_version = 2; // Release version from version.txt, e.g. "2026.11.0".
     uint32 storage_total_kb = 3;
     uint32 storage_free_kb = 4;
     uint64 log_newest_id = 5; // Newest production log entry; 0 when empty.
@@ -18,6 +18,9 @@ message DeviceInfo {
     string js_version = 8;    // QuickJS-NG version job scripts run on, e.g. "0.18.0"; empty without script support.
     uint32 js_arena_kb = 9;   // Memory a script may use.
     bool js_network = 10;     // Scripts may use esp:ws (Script.network).
+    string firmware_commit = 11; // Commit the firmware was built from, e.g. "58b55e2"; empty when unknown.
+    bool firmware_modified = 12; // The build had uncommitted changes, so firmware_commit isn't all of it.
+    string hardware = 13;        // Board revision the firmware was built for, e.g. "8" or "7.1".
 }
 
 // Sets the device clock for this boot; the first request after boot wins.
