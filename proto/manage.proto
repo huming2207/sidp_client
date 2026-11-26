@@ -39,9 +39,13 @@ message AssetBeginResponse {
     uint32 offset = 2;
 }
 
+// What starts a run of the active job, besides JOB_RUN_ONCE (which always
+// can). Kept in NVS; a device with none stored uses DETECT_FALLING.
 enum Trigger {
-    TRIGGER_MANUAL = 0;         // Runs only on JOB_RUN_ONCE.
-    TRIGGER_AUTO_ON_DETECT = 1; // Also runs whenever a target is plugged in.
+    TRIGGER_MANUAL = 0;         // Only JOB_RUN_ONCE: no automatic runs.
+    TRIGGER_DETECT_FALLING = 1; // The detect input falls: a button or harness pulling it to GND.
+    TRIGGER_DETECT_RISING = 2;  // The detect input rises.
+    TRIGGER_DETECT_SWD = 3;     // A target starts answering on SWD (polled); runs again only after it went away.
 }
 
 // Activates the job uploaded as asset "job.pb.new". Setting the active
@@ -117,7 +121,7 @@ message BootRecord {
 
 message RunRecord {
     RunResult result = 1;
-    Trigger trigger = 2; // MANUAL: requested over SIDP; AUTO_ON_DETECT: target plugged in.
+    Trigger trigger = 2; // MANUAL: requested over SIDP; otherwise the detection that started it.
     string job_name = 3;
     bytes job_sha256 = 4;
     int32 error_code = 5; // ESP-IDF esp_err_t of a failed run; 0 otherwise.

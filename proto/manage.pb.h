@@ -10,9 +10,13 @@
 #endif
 
 /* Enum definitions */
+/* What starts a run of the active job, besides JOB_RUN_ONCE (which always
+ can). Kept in NVS; a device with none stored uses DETECT_FALLING. */
 typedef enum _si_manage_Trigger {
-    si_manage_Trigger_TRIGGER_MANUAL = 0, /* Runs only on JOB_RUN_ONCE. */
-    si_manage_Trigger_TRIGGER_AUTO_ON_DETECT = 1 /* Also runs whenever a target is plugged in. */
+    si_manage_Trigger_TRIGGER_MANUAL = 0, /* Only JOB_RUN_ONCE: no automatic runs. */
+    si_manage_Trigger_TRIGGER_DETECT_FALLING = 1, /* The detect input falls: a button or harness pulling it to GND. */
+    si_manage_Trigger_TRIGGER_DETECT_RISING = 2, /* The detect input rises. */
+    si_manage_Trigger_TRIGGER_DETECT_SWD = 3 /* A target starts answering on SWD (polled); runs again only after it went away. */
 } si_manage_Trigger;
 
 typedef enum _si_manage_RunState {
@@ -128,7 +132,7 @@ typedef PB_BYTES_ARRAY_T(32) si_manage_RunRecord_script_sha256_t;
 typedef struct _si_manage_RunRecord {
     bool has_result;
     si_manage_RunResult result;
-    si_manage_Trigger trigger; /* MANUAL: requested over SIDP; AUTO_ON_DETECT: target plugged in. */
+    si_manage_Trigger trigger; /* MANUAL: requested over SIDP; otherwise the detection that started it. */
     char job_name[32];
     pb_byte_t job_sha256[32];
     int32_t error_code; /* ESP-IDF esp_err_t of a failed run; 0 otherwise. */
@@ -192,8 +196,8 @@ extern "C" {
 
 /* Helper constants for enums */
 #define _si_manage_Trigger_MIN si_manage_Trigger_TRIGGER_MANUAL
-#define _si_manage_Trigger_MAX si_manage_Trigger_TRIGGER_AUTO_ON_DETECT
-#define _si_manage_Trigger_ARRAYSIZE ((si_manage_Trigger)(si_manage_Trigger_TRIGGER_AUTO_ON_DETECT+1))
+#define _si_manage_Trigger_MAX si_manage_Trigger_TRIGGER_DETECT_SWD
+#define _si_manage_Trigger_ARRAYSIZE ((si_manage_Trigger)(si_manage_Trigger_TRIGGER_DETECT_SWD+1))
 
 #define _si_manage_RunState_MIN si_manage_RunState_RUN_STATE_IDLE
 #define _si_manage_RunState_MAX si_manage_RunState_RUN_STATE_RUNNING
