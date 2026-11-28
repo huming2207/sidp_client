@@ -48,7 +48,7 @@ are removed. Breakpoints a script set through the FPB are cleared too.
 | `STATUS_SWD_ERROR` | `AGENT_OPEN` could not connect to the target. |
 | `STATUS_NEEDS_CORTEX_M` | `AGENT_OPEN` without a Cortex-M job: the job describes the target (memory map, flash algorithm). |
 | `STATUS_NO_SESSION` | A session request without an open session. |
-| `STATUS_TRAP_ARMED` | `AGENT_OPEN` while a trap is armed; a programming run while an exclusive trap holds the target. |
+| `STATUS_TRAP_ARMED` | `AGENT_OPEN`, a job push (`JOB_SET`, `ASSET_COMMIT`) while a trap is armed; a programming run while an exclusive trap is armed. |
 | `STATUS_NO_SCRIPTS` | The firmware can't run scripts now: no PSRAM, or the script engine failed (see the device log). |
 | `STATUS_INVALID_ARGUMENT` | A malformed message, a bad upload piece, or a capture that is gone. |
 | `STATUS_UNSUPPORTED` | Firmware built without scripts. |
@@ -158,7 +158,9 @@ While a trap is armed `AGENT_OPEN` answers `STATUS_TRAP_ARMED`; `TRAP_STATUS`,
 `EVENT_READ`, `CAPTURE_READ` and the incident requests work. In
 `TRAP_MODE_YIELD` a debugger's `ATTACH` or a programming run pauses the trap
 (`TRAP_STATE_PAUSED`): it lets go of the target as it is and starts again 3 s
-after they finished. In `TRAP_MODE_EXCLUSIVE` they are refused. `TRAP_DISARM`
+after they finished. In `TRAP_MODE_EXCLUSIVE` they are refused while it is
+armed, whether it holds the target at the moment or waits for it; the device
+doesn't start automatic runs or poll SWD for a target either. `TRAP_DISARM`
 stops the trap and leaves the target as it is.
 
 ## Incidents
